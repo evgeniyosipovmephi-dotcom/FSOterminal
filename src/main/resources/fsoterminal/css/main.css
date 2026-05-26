@@ -88,6 +88,17 @@
 
 /* --- Файловый пузырь --- */
 
+/* Тонкая полоса отправки для многокадровых текстов */
+.send-progress-bar {
+    -fx-pref-height: 3;
+    -fx-background-radius: 2;
+    -fx-accent: rgba(255,255,255,0.6);
+}
+
+.bubble-received .send-progress-bar {
+    -fx-accent: #0078d7;
+}
+
 .file-name-label {
     -fx-font-size: 13px;
     -fx-font-weight: bold;

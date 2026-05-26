@@ -1,108 +1,129 @@
 package fsoterminal.model;
 
-import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
+import javafx.beans.property.SimpleStringProperty;
+import javafx.beans.property.StringProperty;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Set;
 
 /**
- * Одно сообщение (или системное уведомление) в чате.
+ * Одна запись в ленте чата.
  *
- * Kind.TEXT  — текстовое сообщение
- * Kind.FILE  — передача файла (прогресс обновляется через fileProgressProperty())
+ * Kind.TEXT  — текстовое сообщение (для многокадровых — progress != null)
+ * Kind.FILE  — файл (прогресс-бар, после сохранения savedPath != null)
+ * Kind.IMAGE — изображение (то же, что FILE + превью по savedPath)
  */
 public class ChatItem {
 
-    public enum Kind      { TEXT, FILE }
+    public enum Kind      { TEXT, FILE, IMAGE }
     public enum Direction { SENT, RECEIVED, SYSTEM }
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
+    private static final Set<String> IMAGE_EXTS =
+        Set.of("jpg","jpeg","png","gif","bmp","webp","tiff","tif");
+
     public final Kind      kind;
     public final Direction direction;
-
-    /** Текст сообщения (для TEXT) или описание-ошибка (для FILE-ошибок). */
-    public final String    text;
+    public final String    text;      // null для FILE/IMAGE
     public final String    time;
 
-    // --- FILE-specific -------------------------------------------------------
-
-    /** Имя файла (null для TEXT/SYSTEM). */
-    public final String fileName;
-
-    /** Размер файла в байтах (0 для TEXT/SYSTEM). */
+    // FILE / IMAGE
+    public final String fileName;    // null для TEXT/SYSTEM
     public final long   fileSize;
 
     /**
-     * Прогресс 0.0 … 1.0. Обновляется только из FX-потока.
-     * null для TEXT/SYSTEM.
+     * Прогресс 0..1. Ненулевой для:
+     * - многокадровых исходящих текстовых сообщений
+     * - любых файлов
+     * null → не отображать полосу прогресса
      */
-    private final DoubleProperty fileProgress;
+    private final SimpleDoubleProperty progress;
+
+    /**
+     * Путь к сохранённому файлу (для IMAGE — чтобы показать превью).
+     * Устанавливается после сохранения на диск.
+     * Observable → ChatCell слушает изменение.
+     */
+    private final SimpleStringProperty savedPath;
 
     // -------------------------------------------------------------------------
 
     private ChatItem(Kind kind, Direction direction, String text,
-                     String fileName, long fileSize) {
-        this.kind         = kind;
-        this.direction    = direction;
-        this.text         = text;
-        this.time         = LocalTime.now().format(TIME_FMT);
-        this.fileName     = fileName;
-        this.fileSize     = fileSize;
-        this.fileProgress = (kind == Kind.FILE)
-                ? new SimpleDoubleProperty(0.0)
-                : null;
+                     String fileName, long fileSize, boolean withProgress) {
+        this.kind      = kind;
+        this.direction = direction;
+        this.text      = text;
+        this.time      = LocalTime.now().format(TIME_FMT);
+        this.fileName  = fileName;
+        this.fileSize  = fileSize;
+        this.progress  = withProgress ? new SimpleDoubleProperty(0.0) : null;
+        this.savedPath = new SimpleStringProperty(null);
     }
 
-    // --- TEXT factories ------------------------------------------------------
+    // --- TEXT ----------------------------------------------------------------
 
     public static ChatItem sent(String text) {
-        return new ChatItem(Kind.TEXT, Direction.SENT, text, null, 0);
+        return new ChatItem(Kind.TEXT, Direction.SENT, text, null, 0, false);
     }
 
     public static ChatItem received(String text) {
-        return new ChatItem(Kind.TEXT, Direction.RECEIVED, text, null, 0);
+        return new ChatItem(Kind.TEXT, Direction.RECEIVED, text, null, 0, false);
     }
 
     public static ChatItem system(String text) {
-        return new ChatItem(Kind.TEXT, Direction.SYSTEM, text, null, 0);
+        return new ChatItem(Kind.TEXT, Direction.SYSTEM, text, null, 0, false);
     }
 
-    // --- FILE factories ------------------------------------------------------
-
-    public static ChatItem fileSent(String fileName, long fileSize) {
-        return new ChatItem(Kind.FILE, Direction.SENT, null, fileName, fileSize);
+    /** Исходящее текстовое сообщение, которое разбивается на несколько кадров — показываем прогресс. */
+    public static ChatItem sentMultiFrame(String text) {
+        return new ChatItem(Kind.TEXT, Direction.SENT, text, null, 0, true);
     }
 
-    public static ChatItem fileReceived(String fileName, long fileSize) {
-        return new ChatItem(Kind.FILE, Direction.RECEIVED, null, fileName, fileSize);
+    // --- FILE / IMAGE --------------------------------------------------------
+
+    public static ChatItem fileSent(String name, long size) {
+        return new ChatItem(Kind.FILE, Direction.SENT, null, name, size, true);
     }
 
-    // --- FILE progress -------------------------------------------------------
-
-    /** Свойство прогресса (0..1). Только для Kind.FILE. */
-    public DoubleProperty fileProgressProperty() {
-        return fileProgress;
+    public static ChatItem fileReceived(String name, long size) {
+        Kind kind = isImageName(name) ? Kind.IMAGE : Kind.FILE;
+        return new ChatItem(kind, Direction.RECEIVED, null, name, size, true);
     }
 
-    /**
-     * Обновить прогресс (0..1). Вызывать только из FX-потока.
-     * Для TEXT/SYSTEM — нет эффекта.
-     */
-    public void setFileProgress(double v) {
-        if (fileProgress != null) fileProgress.set(v);
+    // -------------------------------------------------------------------------
+
+    public SimpleDoubleProperty progressProperty() { return progress; }
+
+    public void setProgress(double v) {
+        if (progress != null) progress.set(v);
     }
 
-    // --- Вспомогательный метод форматирования размера ------------------------
+    public double getProgress() {
+        return progress != null ? progress.get() : 1.0;
+    }
+
+    public StringProperty savedPathProperty() { return savedPath; }
+
+    public void setSavedPath(String path) { savedPath.set(path); }
+
+    public String getSavedPath() { return savedPath.get(); }
+
+    // -------------------------------------------------------------------------
+
+    public static boolean isImageName(String name) {
+        if (name == null) return false;
+        int dot = name.lastIndexOf('.');
+        if (dot < 0) return false;
+        return IMAGE_EXTS.contains(name.substring(dot + 1).toLowerCase());
+    }
 
     public static String formatSize(long bytes) {
-        if (bytes < 1024)
-            return bytes + " Б";
-        if (bytes < 1024 * 1024)
-            return String.format("%.1f КБ", bytes / 1024.0);
-        if (bytes < 1024L * 1024 * 1024)
-            return String.format("%.1f МБ", bytes / (1024.0 * 1024));
-        return String.format("%.1f ГБ", bytes / (1024.0 * 1024 * 1024));
+        if (bytes < 1024)             return bytes + " Б";
+        if (bytes < 1024 * 1024)      return String.format("%.1f КБ", bytes / 1024.0);
+        if (bytes < 1024L * 1024*1024) return String.format("%.1f МБ", bytes / (1024.0*1024));
+        return String.format("%.1f ГБ", bytes / (1024.0*1024*1024));
     }
 }

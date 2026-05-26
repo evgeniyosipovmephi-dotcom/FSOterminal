@@ -5,8 +5,11 @@ import fsoterminal.protocol.*;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -94,6 +97,90 @@ class ProtocolIntegrationTest {
 
         assertEquals(10, b.delivered.size());
         assertEquals(10, a.delivered.size());
+    }
+
+    // -------------------------------------------------------------------------
+    // Сценарий 5: передача файла (FILE_BEGIN / FILE_DATA×N / FILE_END)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void fileTransfer_5percentLoss_fileAssembledCorrectly() throws InterruptedException {
+        // «Файл» — 2 KB псевдослучайных байт
+        byte[] original = new byte[2048];
+        for (int i = 0; i < original.length; i++) original[i] = (byte)(i * 37 + 13);
+        String fileName = "test.bin";
+
+        // Стек A (отправитель файла)
+        List<byte[]> aOut = new ArrayList<>();
+        SlidingWindowSender   senderA   = new SlidingWindowSender(4, aOut::add);
+        AckProcessor          ackA      = new AckProcessor(senderA);
+        List<FrameCodec.Frame> aDelivered = new ArrayList<>();
+        SlidingWindowReceiver receiverA  = new SlidingWindowReceiver(4, aOut::add, aDelivered::add);
+        ackA.setDataHandler(receiverA::onFrame);
+
+        // Стек B (получатель файла)
+        List<byte[]> bOut = new ArrayList<>();
+        SlidingWindowSender   senderB   = new SlidingWindowSender(4, bOut::add);
+        AckProcessor          ackB      = new AckProcessor(senderB);
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        FileAssembler fa = new FileAssembler(
+            (n, sz) -> {},
+            (r, t)  -> {},
+            (n, d)  -> received.set(d)
+        );
+        SlidingWindowReceiver receiverB  = new SlidingWindowReceiver(4, bOut::add, fa::onFrame);
+        ackB.setDataHandler(receiverB::onFrame);
+
+        // Очередь кадров файла для A
+        List<int[]>  types    = new ArrayList<>();
+        List<byte[]> payloads = new ArrayList<>();
+        types.add(new int[]{FrameCodec.TYPE_FILE_BEGIN});
+        payloads.add(encodeFileBegin(fileName, original.length));
+        int off = 0;
+        while (off < original.length) {
+            int len = Math.min(FrameCodec.MAX_PAYLOAD, original.length - off);
+            types.add(new int[]{FrameCodec.TYPE_FILE_DATA});
+            payloads.add(Arrays.copyOfRange(original, off, off + len));
+            off += len;
+        }
+        types.add(new int[]{FrameCodec.TYPE_FILE_END});
+        payloads.add(new byte[0]);
+
+        FSOEmulator chanAtoB = new FSOEmulator(0.05, 42);
+        FSOEmulator chanBtoA = new FSOEmulator(0.02, 43);
+
+        int idx = 0;
+        for (int round = 0; round < 5000; round++) {
+            // A пытается выдать следующий кадр файла
+            while (idx < payloads.size() &&
+                   senderA.trySend(types.get(idx)[0], payloads.get(idx), 0)) {
+                idx++;
+            }
+            transferFrames(aOut, chanAtoB, ackB);
+            transferFrames(bOut, chanBtoA, ackA);
+            if (received.get() != null) break;
+            if (idx >= payloads.size() && senderA.inFlight() > 0)
+                senderA.retransmitUnconfirmed();
+        }
+
+        assertNotNull(received.get(), "Файл не был собран получателем");
+        assertArrayEquals(original, received.get(), "Содержимое файла не совпадает");
+    }
+
+    // -------------------------------------------------------------------------
+    // Вспомогательные: кодирование FILE_BEGIN
+    // -------------------------------------------------------------------------
+
+    private static byte[] encodeFileBegin(String name, long totalBytes) {
+        byte[] nb = name.getBytes(StandardCharsets.UTF_8);
+        int nameLen = Math.min(nb.length, 245);
+        byte[] p = new byte[1 + nameLen + 4];
+        p[0] = (byte) nameLen;
+        System.arraycopy(nb, 0, p, 1, nameLen);
+        int sz = (int) Math.min(totalBytes, 0xFFFFFFFFL);
+        p[1+nameLen] = (byte)(sz); p[2+nameLen] = (byte)(sz>>8);
+        p[3+nameLen] = (byte)(sz>>16); p[4+nameLen] = (byte)(sz>>24);
+        return p;
     }
 
     // -------------------------------------------------------------------------
