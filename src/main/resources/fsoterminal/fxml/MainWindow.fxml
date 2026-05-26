@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.TextField?>
+<?import javafx.scene.layout.BorderPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.shape.Circle?>
+
+<BorderPane xmlns="http://javafx.com/javafx/21"
+            xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="fsoterminal.framesfx.MainWindowSC"
+            stylesheets="@../css/main.css">
+
+    <!-- Панель подключения (сверху) -->
+    <top>
+        <HBox styleClass="toolbar" spacing="8" alignment="CENTER_LEFT">
+            <padding><Insets top="7" right="12" bottom="7" left="12"/></padding>
+
+            <Label text="Порт:" styleClass="toolbar-label"/>
+            <ComboBox fx:id="portCombo" prefWidth="110"/>
+            <Button text="↻" onAction="#onRefreshPorts" styleClass="btn-refresh"
+                    focusTraversable="false"/>
+            <Button fx:id="btnConnect" text="Подключить" onAction="#onConnectClicked"
+                    prefWidth="115" defaultButton="false"/>
+
+            <Circle fx:id="statusDot" radius="7" fill="TOMATO" styleClass="status-dot"/>
+            <Label fx:id="lblStatus" text="Не подключено" styleClass="toolbar-label"/>
+        </HBox>
+    </top>
+
+    <!-- Список сообщений (центр, растягивается) -->
+    <center>
+        <ListView fx:id="chatList" styleClass="chat-list"/>
+    </center>
+
+    <!-- Поле ввода (снизу) -->
+    <bottom>
+        <HBox styleClass="input-bar" spacing="6" alignment="CENTER">
+            <padding><Insets top="8" right="12" bottom="8" left="12"/></padding>
+
+            <TextField fx:id="txtMessage"
+                       promptText="Введите сообщение…"
+                       disable="true"
+                       HBox.hgrow="ALWAYS"/>
+            <Label fx:id="lblCharCount" text="" styleClass="char-count"/>
+            <Button fx:id="btnFile" text="📎" disable="true"
+                    onAction="#onFileAttach"
+                    styleClass="btn-attach" focusTraversable="false"/>
+            <Button fx:id="btnSend" text="Отправить" disable="true"
+                    prefWidth="100"/>
+        </HBox>
+    </bottom>
+
+</BorderPane>

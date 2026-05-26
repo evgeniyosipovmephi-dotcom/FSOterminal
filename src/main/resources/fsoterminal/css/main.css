@@ -1,0 +1,150 @@
+/* =========================================================
+   FSO Terminal — стили интерфейса
+   ========================================================= */
+
+/* --- Панель подключения --- */
+
+.toolbar {
+    -fx-background-color: #2b2b2b;
+}
+
+.toolbar-label {
+    -fx-text-fill: #cccccc;
+    -fx-font-size: 12px;
+}
+
+.btn-refresh {
+    -fx-padding: 4 8 4 8;
+    -fx-min-width: 28;
+    -fx-cursor: hand;
+}
+
+.status-dot {
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 4, 0, 0, 0);
+}
+
+/* --- Список чата --- */
+
+.chat-list {
+    -fx-background-color: #ffffff;
+    -fx-border-color: transparent;
+}
+
+.chat-list .list-cell {
+    -fx-padding: 0;
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+
+.chat-list .list-cell:focused,
+.chat-list .list-cell:selected {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+/* --- Пузыри сообщений --- */
+
+.bubble-sent {
+    -fx-background-color: #0078d7;
+    -fx-background-radius: 14 14 4 14;
+}
+
+.bubble-sent .label {
+    -fx-text-fill: white;
+    -fx-font-size: 13px;
+}
+
+.bubble-received {
+    -fx-background-color: #f0f0f0;
+    -fx-background-radius: 14 14 14 4;
+}
+
+.bubble-received .label {
+    -fx-text-fill: #1a1a1a;
+    -fx-font-size: 13px;
+}
+
+.bubble-system {
+    -fx-background-color: rgba(0,0,0,0.06);
+    -fx-background-radius: 8;
+}
+
+.bubble-system .label {
+    -fx-text-fill: #888888;
+    -fx-font-size: 11px;
+    -fx-font-style: italic;
+}
+
+/* --- Время в пузыре --- */
+
+.chat-time {
+    -fx-font-size: 10px;
+    -fx-text-fill: rgba(100,100,100,0.75);
+}
+
+.bubble-sent .chat-time {
+    -fx-text-fill: rgba(210,230,255,0.85);
+}
+
+/* --- Файловый пузырь --- */
+
+.file-name-label {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+}
+
+.bubble-sent .file-name-label {
+    -fx-text-fill: white;
+}
+
+.bubble-received .file-name-label {
+    -fx-text-fill: #1a1a1a;
+}
+
+.file-progress-bar {
+    -fx-pref-height: 8;
+    -fx-background-radius: 4;
+    -fx-accent: rgba(255,255,255,0.8);
+}
+
+.bubble-received .file-progress-bar {
+    -fx-accent: #0078d7;
+}
+
+.file-size-label {
+    -fx-font-size: 11px;
+    -fx-text-fill: rgba(100,100,100,0.7);
+}
+
+.bubble-sent .file-size-label {
+    -fx-text-fill: rgba(210,230,255,0.85);
+}
+
+/* --- Панель ввода --- */
+
+.input-bar {
+    -fx-background-color: #f5f5f5;
+    -fx-border-color: #dddddd;
+    -fx-border-width: 1 0 0 0;
+}
+
+.input-bar .text-field {
+    -fx-pref-height: 34;
+    -fx-background-radius: 17;
+    -fx-padding: 4 12 4 12;
+    -fx-border-color: #cccccc;
+    -fx-border-radius: 17;
+}
+
+.btn-attach {
+    -fx-padding: 4 10 4 10;
+    -fx-background-radius: 17;
+    -fx-cursor: hand;
+}
+
+.char-count {
+    -fx-text-fill: #aaaaaa;
+    -fx-font-size: 10px;
+    -fx-min-width: 70;
+    -fx-alignment: center-right;
+}
