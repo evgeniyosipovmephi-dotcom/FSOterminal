@@ -97,6 +97,11 @@ src/main/resources/fsoterminal/
 | TextAssembler (фрагментация текста) | ✅ готово | `protocol/TextAssembler.java` |
 | FileAssembler (приём файла) | ✅ готово | `protocol/FileAssembler.java` |
 | Передача файлов (📎, прогресс-бар) | ✅ готово | `framesfx/MainWindowSC.java` |
+| Голосовые сообщения (🎤 запись/воспроизведение) | ✅ готово | `audio/AudioRecorder.java` |
+| Превью изображений в чате | ✅ готово | `framesfx/ChatCell.java` |
+| Drag-and-drop файлов в окно | ✅ готово | `framesfx/MainWindowSC.java` |
+| Прогресс отправки текста | ✅ готово | `framesfx/ChatCell.java` |
+| Portable .exe (jpackage) | ✅ готово | `build.gradle` задача `jpackage` |
 
 ### Протокол текстовых сообщений (TYPE_DATA payload)
 ```
