@@ -27,6 +27,10 @@ application {
 
 test {
     useJUnitPlatform()
+    // Пробрасываем serial.* и другие -D свойства из Gradle в JVM тестов
+    systemProperties System.properties.subMap(
+        System.properties.keySet().findAll { it.toString().startsWith('serial.') }
+    )
 }
 
 compileJava.options.encoding = 'UTF-8'
@@ -44,7 +48,7 @@ task jpackage(type: Exec, dependsOn: installDist) {
     def javaHome = System.getenv('JAVA_HOME') ?: 'C:\\Program Files\\BellSoft\\LibericaJDK-21-Full'
     def distLib  = "${buildDir}/install/${project.name}/lib"
     def destDir  = "${buildDir}/dist"
-    def appVer   = '1.0.0'
+    def appVer   = '1.1.0'
 
     doFirst { mkdir destDir }
 

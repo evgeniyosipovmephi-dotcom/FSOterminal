@@ -31,9 +31,11 @@ import static org.junit.jupiter.api.Assertions.*;
 @EnabledIfSystemProperty(named = "serial.test.enabled", matches = "true")
 class SerialLoopbackTest {
 
-    private static final String PORT_A = System.getProperty("serial.port.a", "COM10");
-    private static final String PORT_B = System.getProperty("serial.port.b", "COM11");
-    private static final int    BAUD   = 115200;
+    private static final String PORT_A  = System.getProperty("serial.port.a", "COM10");
+    private static final String PORT_B  = System.getProperty("serial.port.b", "COM11");
+    private static final int    BAUD    = 115200;
+    private static final int    WINDOW  = 8;
+    private static final int    RT_MS   = 400; // таймаут ретрансмита (мс)
 
     private SerialChannel chanA, chanB;
     private SlidingWindowSender   senderA,   senderB;
@@ -48,9 +50,9 @@ class SerialLoopbackTest {
         List<String> deliveredToA = new ArrayList<>();
         assemblerA  = new TextAssembler(text -> deliveredToA.add(text));
         chanA       = new SerialChannel();
-        senderA     = new SlidingWindowSender(4, chanA::send);
+        senderA     = new SlidingWindowSender(WINDOW, chanA::send);
         ackA        = new AckProcessor(senderA);
-        receiverA   = new SlidingWindowReceiver(4, chanA::send,
+        receiverA   = new SlidingWindowReceiver(WINDOW, chanA::send,
                          frame -> { if (frame.type == FrameCodec.TYPE_DATA) assemblerA.onFrame(frame); });
         ackA.setDataHandler(receiverA::onFrame);
         ackA.setProbeHandler(() -> chanA.send(FrameCodec.encode(0, FrameCodec.TYPE_PROBE_RESP, new byte[0])));
@@ -60,9 +62,9 @@ class SerialLoopbackTest {
         List<String> deliveredToB = new ArrayList<>();
         assemblerB  = new TextAssembler(text -> deliveredToB.add(text));
         chanB       = new SerialChannel();
-        senderB     = new SlidingWindowSender(4, chanB::send);
+        senderB     = new SlidingWindowSender(WINDOW, chanB::send);
         ackB        = new AckProcessor(senderB);
-        receiverB   = new SlidingWindowReceiver(4, chanB::send,
+        receiverB   = new SlidingWindowReceiver(WINDOW, chanB::send,
                          frame -> { if (frame.type == FrameCodec.TYPE_DATA) assemblerB.onFrame(frame); });
         ackB.setDataHandler(receiverB::onFrame);
         ackB.setProbeHandler(() -> chanB.send(FrameCodec.encode(0, FrameCodec.TYPE_PROBE_RESP, new byte[0])));
@@ -138,7 +140,7 @@ class SerialLoopbackTest {
         AtomicReference<byte[]> received = new AtomicReference<>();
         FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
         // Переподключаем диспетчер B (для этого теста)
-        receiverB = new SlidingWindowReceiver(4, chanB::send, faB::onFrame);
+        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
         ackB.setDataHandler(receiverB::onFrame);
 
         // Отправка файла
@@ -159,6 +161,54 @@ class SerialLoopbackTest {
 
         waitFor(() -> received.get() != null, 30_000);
         assertNotNull(received.get(), "Файл не получен");
+        assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
+    }
+
+    /**
+     * Передача файла 10 KB по реальному COM-порту.
+     * Проверяет байт-в-байт целостность и замеряет фактическое время.
+     * Теоретический минимум: 43 кадра × 255 байт / ~11520 байт/с ≈ 0.95 с.
+     * (115200 бод ≈ 11520 байт/с с учётом стоп-бита)
+     */
+    @Test
+    void fileTransfer_10KB_AtoB() throws Exception {
+        byte[] fileData = new byte[10_240];
+        for (int i = 0; i < fileData.length; i++) fileData[i] = (byte)(i * 131 + 17);
+        String fileName = "test10k.bin";
+
+        // FileAssembler на стороне B
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
+        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
+        ackB.setDataHandler(receiverB::onFrame);
+
+        long startMs = System.currentTimeMillis();
+
+        // Отправка файла в отдельном потоке (trySend блокирует на семафоре)
+        Thread sender = new Thread(() -> {
+            try {
+                senderA.trySend(FrameCodec.TYPE_FILE_BEGIN,
+                    encodeFileBegin(fileName, fileData.length), 10_000);
+                int off = 0;
+                while (off < fileData.length) {
+                    int len = Math.min(FrameCodec.MAX_PAYLOAD, fileData.length - off);
+                    senderA.trySend(FrameCodec.TYPE_FILE_DATA,
+                        Arrays.copyOfRange(fileData, off, off + len), 10_000);
+                    off += len;
+                }
+                senderA.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 10_000);
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "file-send-10k");
+        sender.setDaemon(true);
+        sender.start();
+
+        waitFor(() -> received.get() != null, 60_000);
+        long elapsedMs = System.currentTimeMillis() - startMs;
+
+        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с%n",
+            elapsedMs / 1000.0, fileData.length / (elapsedMs / 1000.0));
+
+        assertNotNull(received.get(), "Файл не получен за 60 секунд");
         assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
     }
 
@@ -194,7 +244,13 @@ class SerialLoopbackTest {
             Thread t = new Thread(r, "retransmit");
             t.setDaemon(true); return t;
         });
-        ex.scheduleAtFixedRate(s::retransmitUnconfirmed, 400, 400, TimeUnit.MILLISECONDS);
+        // Ретрансмит только если окно не продвигалось RT_MS мс (потерян хвостовой кадр).
+        // Промежуточные потери обрабатывает gap-based Selective Repeat в onAck().
+        ex.scheduleAtFixedRate(() -> {
+            if (s.inFlight() == 0) return;
+            long silentMs = System.currentTimeMillis() - s.getLastAckAdvanceMs();
+            if (silentMs >= RT_MS) s.retransmitUnconfirmed();
+        }, RT_MS, RT_MS, TimeUnit.MILLISECONDS);
         return ex;
     }
 

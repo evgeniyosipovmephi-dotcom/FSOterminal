@@ -60,14 +60,16 @@ class AckProcessorTest {
     }
 
     @Test
-    void feed_noneConfirmed_retransmitsAll() throws InterruptedException {
+    void feed_noneConfirmed_noRetransmit() throws InterruptedException {
+        // bitmap=0 без advance: кадры ещё могут быть в пути.
+        // onAck() не должен их перепосылать — это задача таймера.
         sender.send(FrameCodec.TYPE_DATA, new byte[]{1});
         sender.send(FrameCodec.TYPE_DATA, new byte[]{2});
         sent.clear();
 
         proc.feed(makeAck(0, 0, 0b0000));
 
-        assertEquals(2, sent.size());
+        assertEquals(0, sent.size());
     }
 
     @Test

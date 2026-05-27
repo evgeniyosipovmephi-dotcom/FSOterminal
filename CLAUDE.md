@@ -57,6 +57,17 @@ RTS/CTS (STM32 не поддерживает — прошивка не меня�
 | 0x11 | TYPE_FILE_END | конец передачи файла |
 | 0x20 | TYPE_VOICE | сегмент голосового сообщения |
 
+## Конфигурация протокола (`ProtocolConfig`)
+Хранится в `Preferences` (реестр Windows). Параметры:
+| Ключ | По умолчанию | Описание |
+|---|---|---|
+| `windowSize` | 8 | Размер скользящего окна (1–16) |
+| `retransmitMs` | 400 | Интервал ретрансмиссии, мс |
+| `probeIntervalSec` | 5 | Интервал PROBE, сек |
+| `downloadPath` | "" | Папка сохранения файлов (пусто = ~/Downloads) |
+
+Изменяются через меню **Настройки → Параметры протокола…**. Вступают в силу при следующем подключении.
+
 ## Структура исходного кода
 ```
 src/main/java/fsoterminal/
@@ -66,7 +77,8 @@ src/main/java/fsoterminal/
 │   ├── SlidingWindowReceiver.java  ✅ + тесты
 │   ├── AckProcessor.java           ✅ + тесты
 │   ├── TextAssembler.java          ✅ + тесты
-│   └── FileAssembler.java          ✅
+│   ├── FileAssembler.java          ✅
+│   └── ProtocolConfig.java         ✅
 ├── channel/
 │   ├── FSOEmulator.java            ✅ + тесты
 │   └── SerialChannel.java          ✅ (jSerialComm)
@@ -102,6 +114,13 @@ src/main/resources/fsoterminal/
 | Drag-and-drop файлов в окно | ✅ готово | `framesfx/MainWindowSC.java` |
 | Прогресс отправки текста | ✅ готово | `framesfx/ChatCell.java` |
 | Portable .exe (jpackage) | ✅ готово | `build.gradle` задача `jpackage` |
+| Настройки протокола (окно, RTT) | ✅ готово | `protocol/ProtocolConfig.java`, меню «Настройки» |
+| RTT-измерение (PROBE → PROBE_RESP) | ✅ готово | `framesfx/MainWindowSC.java`, метка `lblRtt` в тулбаре |
+| Отмена отправки файла | ✅ готово | кнопка ✕ в ChatCell, `cancelAction` в ChatItem |
+| Воспроизведение отправленного голоса | ✅ готово | `savedPath` устанавливается немедленно для SENT-voice |
+| Превью отправленного изображения | ✅ готово | `imageSent()` + `savedPath` = путь к исходному файлу |
+| Меню Справка / О программе | ✅ готово | `framesfx/MainWindowSC.java` → `onHelp()` |
+| Настраиваемая папка сохранения | ✅ готово | `ProtocolConfig.downloadPath` + диалог выбора |
 
 ### Протокол текстовых сообщений (TYPE_DATA payload)
 ```

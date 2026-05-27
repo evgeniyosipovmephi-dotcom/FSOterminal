@@ -26,6 +26,13 @@ public class SlidingWindowSender {
 
     private final Semaphore credits;
 
+    /**
+     * Метка времени последнего продвижения base (освобождение кредита по ACK).
+     * Используется таймером: если окно не сдвигалось retransmitInterval мс —
+     * значит хвостовой кадр потерян → вызвать retransmitUnconfirmed().
+     */
+    private volatile long lastAckAdvanceMs = 0;
+
     public SlidingWindowSender(int windowSize, Consumer<byte[]> frameOutput) {
         if (windowSize < 1 || windowSize > 16)
             throw new IllegalArgumentException("windowSize: 1..16");
@@ -107,12 +114,24 @@ public class SlidingWindowSender {
             base++;
             released++;
         }
-        if (released > 0) credits.release(released);
+        if (released > 0) {
+            credits.release(released);
+            lastAckAdvanceMs = System.currentTimeMillis();
+        }
 
-        // Досылаем кадры которые получатель не видел
-        for (int i = base; i < next; i++) {
-            if (!confirmed[i % windowSize])
-                frameOutput.accept(slots[i % windowSize]);
+        // Selective Repeat: перепосылаем только «провалившиеся» кадры —
+        // те, у которых более поздний кадр в окне уже подтверждён.
+        // Кадры без подтверждённых «за ними» могут быть просто в пути;
+        // их обработает таймер (retransmitUnconfirmed по истечении timeout).
+        int inFlight2 = next - base;
+        for (int i = 0; i < inFlight2; i++) {
+            if (!confirmed[(base + i) % windowSize]) {
+                boolean gapped = false;
+                for (int j = i + 1; j < inFlight2; j++) {
+                    if (confirmed[(base + j) % windowSize]) { gapped = true; break; }
+                }
+                if (gapped) frameOutput.accept(slots[(base + i) % windowSize]);
+            }
         }
     }
 
@@ -132,8 +151,10 @@ public class SlidingWindowSender {
     // Состояние (для диагностики и тестов)
     // -------------------------------------------------------------------------
 
-    public synchronized int inFlight()      { return next - base; }
-    public int              availableCredits() { return credits.availablePermits(); }
-    public synchronized int nextSeq()       { return next & 0xFF; }
-    public synchronized int baseSeq()       { return base & 0xFF; }
+    public synchronized int  inFlight()          { return next - base; }
+    public int               availableCredits()  { return credits.availablePermits(); }
+    public synchronized int  nextSeq()           { return next & 0xFF; }
+    public synchronized int  baseSeq()           { return base & 0xFF; }
+    /** Когда последний раз base продвинулся (ACK освободил кредит). */
+    public long              getLastAckAdvanceMs() { return lastAckAdvanceMs; }
 }

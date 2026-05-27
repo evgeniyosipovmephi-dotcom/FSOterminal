@@ -23,10 +23,11 @@ public class FrameCodec {
     public static final int TYPE_ACK        = 0x02;
     public static final int TYPE_PROBE      = 0x03;
     public static final int TYPE_PROBE_RESP = 0x04;
-    public static final int TYPE_FILE_BEGIN = 0x10;
-    public static final int TYPE_FILE_END   = 0x11;
-    public static final int TYPE_FILE_DATA  = 0x12;
-    public static final int TYPE_VOICE      = 0x20;
+    public static final int TYPE_FILE_BEGIN   = 0x10;
+    public static final int TYPE_FILE_END    = 0x11;
+    public static final int TYPE_FILE_DATA   = 0x12;
+    public static final int TYPE_FILE_CANCEL = 0x13; // отправитель отменил передачу
+    public static final int TYPE_VOICE       = 0x20;
 
     /** Декодированный кадр. */
     public static final class Frame {

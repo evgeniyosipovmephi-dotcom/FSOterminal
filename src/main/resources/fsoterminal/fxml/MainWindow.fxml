@@ -5,9 +5,14 @@
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.Menu?>
+<?import javafx.scene.control.MenuBar?>
+<?import javafx.scene.control.MenuItem?>
+<?import javafx.scene.control.SeparatorMenuItem?>
 <?import javafx.scene.control.TextField?>
 <?import javafx.scene.layout.BorderPane?>
 <?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.VBox?>
 <?import javafx.scene.shape.Circle?>
 
 <BorderPane fx:id="rootPane"
@@ -16,21 +21,41 @@
             fx:controller="fsoterminal.framesfx.MainWindowSC"
             stylesheets="@../css/main.css">
 
-    <!-- Панель подключения (сверху) -->
+    <!-- Панель подключения + меню (сверху) -->
     <top>
-        <HBox styleClass="toolbar" spacing="8" alignment="CENTER_LEFT">
-            <padding><Insets top="7" right="12" bottom="7" left="12"/></padding>
+        <VBox>
+            <!-- Строка меню -->
+            <MenuBar>
+                <menus>
+                    <Menu text="Настройки">
+                        <items>
+                            <MenuItem text="Параметры протокола…" onAction="#onSettings"/>
+                        </items>
+                    </Menu>
+                    <Menu text="Справка">
+                        <items>
+                            <MenuItem text="О программе" onAction="#onHelp"/>
+                        </items>
+                    </Menu>
+                </menus>
+            </MenuBar>
 
-            <Label text="Порт:" styleClass="toolbar-label"/>
-            <ComboBox fx:id="portCombo" prefWidth="110"/>
-            <Button text="↻" onAction="#onRefreshPorts" styleClass="btn-refresh"
-                    focusTraversable="false"/>
-            <Button fx:id="btnConnect" text="Подключить" onAction="#onConnectClicked"
-                    prefWidth="115" defaultButton="false"/>
+            <!-- Тулбар подключения -->
+            <HBox styleClass="toolbar" spacing="8" alignment="CENTER_LEFT">
+                <padding><Insets top="7" right="12" bottom="7" left="12"/></padding>
 
-            <Circle fx:id="statusDot" radius="7" fill="TOMATO" styleClass="status-dot"/>
-            <Label fx:id="lblStatus" text="Не подключено" styleClass="toolbar-label"/>
-        </HBox>
+                <Label text="Порт:" styleClass="toolbar-label"/>
+                <ComboBox fx:id="portCombo" prefWidth="110"/>
+                <Button text="↻" onAction="#onRefreshPorts" styleClass="btn-refresh"
+                        focusTraversable="false"/>
+                <Button fx:id="btnConnect" text="Подключить" onAction="#onConnectClicked"
+                        prefWidth="115" defaultButton="false"/>
+
+                <Circle fx:id="statusDot" radius="7" fill="TOMATO" styleClass="status-dot"/>
+                <Label fx:id="lblStatus" text="Не подключено" styleClass="toolbar-label"/>
+                <Label fx:id="lblRtt" text="" styleClass="rtt-label"/>
+            </HBox>
+        </VBox>
     </top>
 
     <!-- Список сообщений (центр, растягивается) -->

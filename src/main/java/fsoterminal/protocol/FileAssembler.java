@@ -36,6 +36,12 @@ public class FileAssembler {
      */
     private final BiConsumer<String, byte[]> onComplete;
 
+    /**
+     * Вызывается когда отправитель явно отменил передачу (TYPE_FILE_CANCEL).
+     * Внутреннее состояние уже сброшено к моменту вызова.
+     */
+    private Runnable onCancel;
+
     // --- Внутреннее состояние ------------------------------------------------
 
     private String                name;
@@ -52,6 +58,8 @@ public class FileAssembler {
         this.onComplete = onComplete;
     }
 
+    public void setOnCancel(Runnable r) { onCancel = r; }
+
     // -------------------------------------------------------------------------
 
     /**
@@ -60,9 +68,10 @@ public class FileAssembler {
      */
     public void onFrame(FrameCodec.Frame frame) {
         switch (frame.type) {
-            case FrameCodec.TYPE_FILE_BEGIN -> handleBegin(frame);
-            case FrameCodec.TYPE_FILE_DATA  -> handleData(frame);
-            case FrameCodec.TYPE_FILE_END   -> handleEnd(frame);
+            case FrameCodec.TYPE_FILE_BEGIN   -> handleBegin(frame);
+            case FrameCodec.TYPE_FILE_DATA    -> handleData(frame);
+            case FrameCodec.TYPE_FILE_END     -> handleEnd(frame);
+            case FrameCodec.TYPE_FILE_CANCEL  -> handleCancel();
             // остальные типы — не наше дело
         }
     }
@@ -106,5 +115,10 @@ public class FileAssembler {
         String completedName = name;
         reset();
         if (onComplete != null) onComplete.accept(completedName, data);
+    }
+
+    private void handleCancel() {
+        reset(); // сбросить частично принятый файл
+        if (onCancel != null) onCancel.run();
     }
 }

@@ -4,6 +4,7 @@ import fsoterminal.audio.AudioRecorder;
 import fsoterminal.model.ChatItem;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
+import javafx.beans.binding.Bindings;
 import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -19,13 +20,14 @@ import javafx.scene.layout.VBox;
 import javafx.util.Duration;
 
 import javax.sound.sampled.*;
+import java.awt.Desktop;
 import java.io.File;
 
 /**
  * Ячейка чата.
  *
  * Kind.TEXT  — текстовый пузырь; если progress != null — полоса отправки
- * Kind.FILE  — иконка + прогресс + размер
+ * Kind.FILE  — иконка + прогресс + размер; кнопка ✕ для SENT в процессе
  * Kind.IMAGE — как FILE + превью после сохранения
  * Kind.VOICE — иконка 🎤 + кнопка ▶/⏹ + длительность
  */
@@ -41,13 +43,16 @@ public class ChatCell extends ListCell<ChatItem> {
     private final ProgressBar txtProgress = new ProgressBar(0);
 
     // --- Файл / изображение ---
-    private final Label       lblFileName = new Label();
+    private final Label       lblFileName  = new Label();
     private final ProgressBar fileProgress = new ProgressBar(0);
     private final Label       lblFileMeta  = new Label();
     private final ImageView   thumbnail    = new ImageView();
 
+    // --- Отмена ---
+    private final Button btnCancel = new Button("✕");
+
     // --- Голос ---
-    private final HBox   voiceRow    = new HBox(8);
+    private final HBox   voiceRow     = new HBox(8);
     private final Label  lblVoiceIcon = new Label("🎤");
     private final Button btnPlay      = new Button("▶");
     private final Label  lblDuration  = new Label("0:00");
@@ -60,7 +65,6 @@ public class ChatCell extends ListCell<ChatItem> {
 
     // --- Listener management ---
     private ChatItem               boundItem;
-    private ChangeListener<Number> progressListener;
     private ChangeListener<String> pathListener;
 
     // =========================================================================
@@ -90,6 +94,11 @@ public class ChatCell extends ListCell<ChatItem> {
         thumbnail.setSmooth(true);
         thumbnail.setVisible(false);
         thumbnail.setManaged(false);
+
+        // Кнопка отмены
+        btnCancel.getStyleClass().add("btn-cancel");
+        btnCancel.setVisible(false);
+        btnCancel.setManaged(false);
 
         // Голос
         lblVoiceIcon.setStyle("-fx-font-size: 16px;");
@@ -140,19 +149,13 @@ public class ChatCell extends ListCell<ChatItem> {
     private void buildText(ChatItem item) {
         lblText.setText(item.text);
         lblTime.setText(item.time);
-        if (item.progressProperty() != null && item.getProgress() < 1.0) {
-            txtProgress.setVisible(true);
-            txtProgress.setManaged(true);
+        if (item.progressProperty() != null) {
             txtProgress.progressProperty().bind(item.progressProperty());
-            progressListener = (o, ov, nv) -> {
-                if (nv.doubleValue() >= 1.0) {
-                    txtProgress.setVisible(false);
-                    txtProgress.setManaged(false);
-                    txtProgress.progressProperty().unbind();
-                }
-            };
-            item.progressProperty().addListener(progressListener);
-            boundItem = item;
+            // Visibility через Binding — корректно работает при любом текущем progress
+            txtProgress.visibleProperty().bind(
+                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
+            txtProgress.managedProperty().bind(
+                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
             bubble.getChildren().addAll(lblText, txtProgress, lblTime);
         } else {
             txtProgress.setVisible(false);
@@ -163,11 +166,14 @@ public class ChatCell extends ListCell<ChatItem> {
 
     private void buildFile(ChatItem item) {
         lblFileName.setText("📎 " + item.fileName);
+        lblFileName.setStyle("-fx-cursor: hand;");
+        lblFileName.setOnMouseClicked(e -> openFile(item.getSavedPath()));
         lblFileMeta.setText(ChatItem.formatSize(item.fileSize) + "  ·  " + item.time);
-        bindFileProgress(item);
         thumbnail.setVisible(false);
         thumbnail.setManaged(false);
-        bubble.getChildren().addAll(lblFileName, fileProgress, lblFileMeta);
+        bindFileProgressUi(item);
+        HBox metaRow = buildMetaRow(item, lblFileMeta);
+        bubble.getChildren().addAll(lblFileName, fileProgress, metaRow);
     }
 
     private void buildImage(ChatItem item) {
@@ -175,13 +181,17 @@ public class ChatCell extends ListCell<ChatItem> {
         thumbnail.setImage(null);
         thumbnail.setVisible(false);
         thumbnail.setManaged(false);
+        thumbnail.setStyle("-fx-cursor: hand;");
+        thumbnail.setOnMouseClicked(e -> openFile(item.getSavedPath()));
         bubble.getChildren().add(thumbnail);
 
         String path = item.getSavedPath();
-        if (path != null) { loadThumbnail(path); }
-        else {
-            pathListener = (o, ov, nv) -> { if (nv != null) loadThumbnail(nv); };
-            item.savedPathProperty().addListener(pathListener);
+        if (path != null) {
+            loadThumbnail(path);
+        } else {
+            ChangeListener<String> pl = (o, ov, nv) -> { if (nv != null) loadThumbnail(nv); };
+            item.savedPathProperty().addListener(pl);
+            pathListener = pl;
             if (boundItem == null) boundItem = item;
         }
     }
@@ -190,17 +200,23 @@ public class ChatCell extends ListCell<ChatItem> {
         double dur = AudioRecorder.durationSeconds(item.fileSize);
         lblDuration.setText(AudioRecorder.formatDuration(dur));
         voiceBar.setProgress(0);
+        voiceBar.setVisible(true);
+        voiceBar.setManaged(true);
+        bindFileProgressUi(item);
 
-        // Кнопка play активна только после получения файла
-        boolean ready = item.getProgress() >= 1.0 && item.getSavedPath() != null;
-        btnPlay.setDisable(!ready);
+        // Кнопка play: SENT — можно слушать сразу (файл уже записан локально),
+        //              RECEIVED — только после сохранения (savedPath != null)
         btnPlay.setText("▶");
+        String savedPath = item.getSavedPath();
+        boolean sentReady    = (item.direction == ChatItem.Direction.SENT && savedPath != null);
+        boolean receivedReady = (item.direction == ChatItem.Direction.RECEIVED
+                                 && savedPath != null && item.getProgress() >= 1.0);
 
-        if (ready) {
-            btnPlay.setOnAction(e -> togglePlayback(item.getSavedPath()));
+        if (sentReady || receivedReady) {
+            btnPlay.setDisable(false);
+            btnPlay.setOnAction(e -> togglePlayback(savedPath));
         } else {
-            // Ждём завершения получения
-            bindFileProgress(item);
+            btnPlay.setDisable(true);
             ChangeListener<String> pl = (o, ov, nv) -> {
                 if (nv != null) {
                     btnPlay.setDisable(false);
@@ -213,7 +229,50 @@ public class ChatCell extends ListCell<ChatItem> {
         }
 
         lblVoiceMeta.setText(AudioRecorder.formatDuration(dur) + "  ·  " + item.time);
-        bubble.getChildren().addAll(voiceRow, fileProgress, lblVoiceMeta);
+        HBox metaRow = buildMetaRow(item, lblVoiceMeta);
+        bubble.getChildren().addAll(voiceRow, fileProgress, metaRow);
+    }
+
+    /**
+     * Привязывает fileProgress к прогрессу элемента через Binding.
+     * Скрывает/показывает прогресс-бар реактивно — корректно работает
+     * даже если updateItem() вызван после завершения передачи.
+     */
+    private void bindFileProgressUi(ChatItem item) {
+        if (item.progressProperty() == null) {
+            fileProgress.setVisible(false);
+            fileProgress.setManaged(false);
+            return;
+        }
+        // Явно устанавливаем видимость до привязки: защита от "грязного" состояния
+        // при повторном использовании ячейки (cell reuse в ListView).
+        boolean inProgress = item.getProgress() < 1.0;
+        fileProgress.setVisible(inProgress);
+        fileProgress.setManaged(inProgress);
+
+        fileProgress.progressProperty().bind(item.progressProperty());
+        fileProgress.visibleProperty().bind(
+            Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
+        fileProgress.managedProperty().bind(
+            Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
+        boundItem = item;
+    }
+
+    /** Строит строку с мета-данными и кнопкой ✕ (для SENT-кадров в процессе передачи). */
+    private HBox buildMetaRow(ChatItem item, Label metaLabel) {
+        if (item.direction == ChatItem.Direction.SENT && item.progressProperty() != null) {
+            btnCancel.setOnAction(e -> { Runnable ca = item.getCancelAction(); if (ca != null) ca.run(); });
+            btnCancel.visibleProperty().bind(
+                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
+            btnCancel.managedProperty().bind(
+                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
+        } else {
+            btnCancel.setVisible(false);
+            btnCancel.setManaged(false);
+        }
+        HBox row = new HBox(6, metaLabel, btnCancel);
+        row.setAlignment(Pos.CENTER_LEFT);
+        return row;
     }
 
     // =========================================================================
@@ -221,11 +280,8 @@ public class ChatCell extends ListCell<ChatItem> {
     // =========================================================================
 
     private void togglePlayback(String path) {
-        if (clip != null && clip.isRunning()) {
-            stopPlayback();
-        } else {
-            startPlayback(path);
-        }
+        if (clip != null && clip.isRunning()) stopPlayback();
+        else startPlayback(path);
     }
 
     private void startPlayback(String path) {
@@ -266,21 +322,29 @@ public class ChatCell extends ListCell<ChatItem> {
     // Вспомогательные
     // =========================================================================
 
-    private void bindFileProgress(ChatItem item) {
-        fileProgress.progressProperty().unbind();
-        fileProgress.progressProperty().bind(item.progressProperty());
-        fileProgress.setVisible(item.getProgress() < 1.0);
-        fileProgress.setManaged(item.getProgress() < 1.0);
-
-        ChangeListener<Number> pl = (o, ov, nv) -> {
-            if (nv.doubleValue() >= 1.0) {
-                fileProgress.setVisible(false);
-                fileProgress.setManaged(false);
+    /**
+     * Открывает файл в приложении по умолчанию, а если не получается — показывает
+     * папку с файлом в Проводнике.
+     */
+    private void openFile(String path) {
+        if (path == null) return;
+        new Thread(() -> {
+            File f = new File(path);
+            try {
+                if (f.exists()) {
+                    Desktop.getDesktop().open(f);
+                } else {
+                    // Файл перемещён/удалён — открываем папку
+                    File dir = f.getParentFile();
+                    if (dir != null && dir.exists()) Desktop.getDesktop().open(dir);
+                }
+            } catch (Exception ex) {
+                // Fallback: explorer /select — выделяет файл в Проводнике
+                try {
+                    new ProcessBuilder("explorer.exe", "/select,", f.getAbsolutePath()).start();
+                } catch (Exception ignored) {}
             }
-        };
-        item.progressProperty().addListener(pl);
-        progressListener = pl;
-        boundItem = item;
+        }, "open-file").start();
     }
 
     private void loadThumbnail(String path) {
@@ -314,14 +378,21 @@ public class ChatCell extends ListCell<ChatItem> {
     }
 
     private void unbindCurrent() {
+        // Снять все Binding-и
         txtProgress.progressProperty().unbind();
+        txtProgress.visibleProperty().unbind();
+        txtProgress.managedProperty().unbind();
         fileProgress.progressProperty().unbind();
-        if (boundItem != null) {
-            if (progressListener != null)
-                boundItem.progressProperty().removeListener(progressListener);
-            if (pathListener != null)
-                boundItem.savedPathProperty().removeListener(pathListener);
-        }
-        boundItem = null; progressListener = null; pathListener = null;
+        fileProgress.visibleProperty().unbind();
+        fileProgress.managedProperty().unbind();
+        btnCancel.visibleProperty().unbind();
+        btnCancel.managedProperty().unbind();
+        btnCancel.setVisible(false);
+        btnCancel.setManaged(false);
+
+        // Снять слушателей savedPath
+        if (boundItem != null && pathListener != null)
+            boundItem.savedPathProperty().removeListener(pathListener);
+        boundItem = null; pathListener = null;
     }
 }

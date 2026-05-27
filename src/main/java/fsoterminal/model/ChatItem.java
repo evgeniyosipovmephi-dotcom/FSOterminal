@@ -50,6 +50,12 @@ public class ChatItem {
      */
     private final SimpleStringProperty savedPath;
 
+    /**
+     * Действие отмены отправки. Устанавливается sendFile() перед стартом потока,
+     * обнуляется после завершения. null — отмена недоступна.
+     */
+    private volatile Runnable cancelAction;
+
     // -------------------------------------------------------------------------
 
     private ChatItem(Kind kind, Direction direction, String text,
@@ -101,6 +107,11 @@ public class ChatItem {
         return new ChatItem(Kind.VOICE, Direction.SENT, null, name, size, true);
     }
 
+    /** Исходящее изображение (идёт отправка; savedPath устанавливается немедленно для превью). */
+    public static ChatItem imageSent(String name, long size) {
+        return new ChatItem(Kind.IMAGE, Direction.SENT, null, name, size, true);
+    }
+
     // -------------------------------------------------------------------------
 
     public SimpleDoubleProperty progressProperty() { return progress; }
@@ -120,6 +131,9 @@ public class ChatItem {
     public String getSavedPath() { return savedPath.get(); }
 
     // -------------------------------------------------------------------------
+
+    public void setCancelAction(Runnable r) { cancelAction = r; }
+    public Runnable getCancelAction()       { return cancelAction; }
 
     public static boolean isImageName(String name) {
         return hasExtension(name, IMAGE_EXTS);

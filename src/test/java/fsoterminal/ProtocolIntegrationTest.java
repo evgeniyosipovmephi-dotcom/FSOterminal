@@ -299,4 +299,127 @@ class ProtocolIntegrationTest {
                 "Сообщение #" + i + " не совпадает");
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Сценарий 6: эффективность передачи 10 KB (Selective Repeat не флудит канал)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Проверяет, что после исправления onAck() (gap-based Selective Repeat)
+     * передача 10 KB файла не создаёт лавину лишних ретрансмитов.
+     *
+     * Теоретика:
+     *   • FILE_BEGIN + ceil(10240/250) + FILE_END = 43 кадра
+     *   • С 5% потерями: ожидаемых ретрансмитов ~5% → итого ~45–46 кадров
+     *   • Граница теста: totalSent ≤ totalNeeded × 2  (≤100% overhead)
+     *   • Старый код при окне 8: каждый ACK → 7 retransmit → >500 кадров вместо 43
+     */
+    @Test
+    void fileTransfer_10KB_efficiencyCheck() throws InterruptedException {
+        final int WINDOW = 8;
+        final int CHUNK  = FrameCodec.MAX_PAYLOAD; // 250 байт
+
+        // Файл 10 KB псевдослучайных байт
+        byte[] original = new byte[10_240];
+        for (int i = 0; i < original.length; i++) original[i] = (byte)(i * 131 + 17);
+        String fileName = "bigtest.bin";
+
+        // ----- Стек A (отправитель файла) -----
+        // Оборачиваем frameOutput сендера для подсчёта ВСЕХ отправленных кадров
+        // (оригинальные отправки + любые ретрансмиты)
+        List<byte[]> aOut      = new ArrayList<>();
+        int[]        sentCount = {0};
+
+        SlidingWindowSender senderA = new SlidingWindowSender(WINDOW, frame -> {
+            aOut.add(frame);
+            sentCount[0]++;
+        });
+        AckProcessor          ackA      = new AckProcessor(senderA);
+        List<FrameCodec.Frame> aDelivered = new ArrayList<>();
+        // receiverA пассивен: B файлы обратно не шлёт; ACKи от него идут через bOut
+        SlidingWindowReceiver receiverA  = new SlidingWindowReceiver(WINDOW, aOut::add, aDelivered::add);
+        ackA.setDataHandler(receiverA::onFrame);
+
+        // ----- Стек B (получатель файла) -----
+        List<byte[]> bOut = new ArrayList<>();
+        SlidingWindowSender   senderB   = new SlidingWindowSender(WINDOW, bOut::add);
+        AckProcessor          ackB      = new AckProcessor(senderB);
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        FileAssembler fa = new FileAssembler(
+            (n, sz) -> {},
+            (r, t)  -> {},
+            (n, d)  -> received.set(d)
+        );
+        SlidingWindowReceiver receiverB  = new SlidingWindowReceiver(WINDOW, bOut::add, fa::onFrame);
+        ackB.setDataHandler(receiverB::onFrame);
+
+        // ----- Очередь кадров файла -----
+        List<int[]>  types    = new ArrayList<>();
+        List<byte[]> payloads = new ArrayList<>();
+        types.add(new int[]{FrameCodec.TYPE_FILE_BEGIN});
+        payloads.add(encodeFileBegin(fileName, original.length));
+        int off = 0;
+        while (off < original.length) {
+            int len = Math.min(CHUNK, original.length - off);
+            types.add(new int[]{FrameCodec.TYPE_FILE_DATA});
+            payloads.add(Arrays.copyOfRange(original, off, off + len));
+            off += len;
+        }
+        types.add(new int[]{FrameCodec.TYPE_FILE_END});
+        payloads.add(new byte[0]);
+
+        int totalFramesNeeded = payloads.size(); // 1 + 41 + 1 = 43
+
+        // ----- Эмуляторы канала -----
+        FSOEmulator chanAtoB = new FSOEmulator(0.05, 42); // 5% потерь данных
+        FSOEmulator chanBtoA = new FSOEmulator(0.02, 43); // 2% потерь ACK
+
+        // ----- Симуляция (tick-based, каждый round ≈ 1 RTT) -----
+        int idx    = 0;
+        int rounds = 0;
+
+        for (int round = 0; round < 5000; round++) {
+            // A заполняет окно следующими кадрами файла (trySend неблокирующий: timeout=0)
+            while (idx < payloads.size() &&
+                   senderA.trySend(types.get(idx)[0], payloads.get(idx), 0)) {
+                idx++;
+            }
+            transferFrames(aOut, chanAtoB, ackB);
+            transferFrames(bOut, chanBtoA, ackA);
+            rounds++;
+
+            if (received.get() != null) break;
+
+            // Таймерный fallback: все кадры отправлены, но хвостовой потерян
+            if (idx >= payloads.size() && senderA.inFlight() > 0)
+                senderA.retransmitUnconfirmed();
+        }
+
+        // ----- Метрики эффективности -----
+        int    totalSent    = sentCount[0];
+        int    overhead     = totalSent - totalFramesNeeded;
+        double overheadPct  = 100.0 * overhead / totalFramesNeeded;
+
+        // Теоретическое время (все кадры × размер / скорость канала)
+        double frameBytes   = CHUNK + FrameCodec.HEADER + FrameCodec.TRAILER; // ~255 байт
+        double chanBytesS   = 3000.0; // ~24 кбит/с
+        double theorSec     = totalFramesNeeded * frameBytes / chanBytesS;
+        double simulatedSec = rounds * 0.130; // каждый round ≈ RTT/2 ≈ 65 мс... берём полный RTT
+
+        System.out.printf(
+            "%n[10KB efficiency] Кадров нужно: %d | Отправлено всего: %d | Overhead: +%d (%.1f%%)%n",
+            totalFramesNeeded, totalSent, overhead, overheadPct);
+        System.out.printf(
+            "[10KB efficiency] Теор. время: %.2f с | Симул. время: %.2f с | Раундов: %d%n",
+            theorSec, simulatedSec, rounds);
+
+        // ----- Assertions -----
+        assertNotNull(received.get(),
+            "Файл не был собран получателем за 5000 раундов");
+        assertArrayEquals(original, received.get(),
+            "Содержимое полученного файла не совпадает с оригиналом");
+        assertTrue(totalSent <= totalFramesNeeded * 2,
+            String.format("Слишком много ретрансмитов: отправлено %d, нужно %d, лимит ×2 = %d",
+                totalSent, totalFramesNeeded, totalFramesNeeded * 2));
+    }
 }

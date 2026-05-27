@@ -111,14 +111,16 @@ class SlidingWindowSenderTest {
     }
 
     @Test
-    void onAck_noneConfirmed_retransmitsAll() throws InterruptedException {
+    void onAck_noneConfirmed_noRetransmit() throws InterruptedException {
+        // bitmap=0 при отсутствии advance означает: кадры ещё в пути (не потеряны).
+        // onAck() не должен их перепосылать — это задача таймера (timeout fallback).
         sender.send(FrameCodec.TYPE_DATA, new byte[]{1});
         sender.send(FrameCodec.TYPE_DATA, new byte[]{2});
 
         sent.clear();
-        sender.onAck(0, 0b0000); // никто не получил
+        sender.onAck(0, 0b0000); // получатель ничего не видел — кадры в пути
 
-        assertEquals(2, sent.size());
+        assertEquals(0, sent.size()); // ретрансмит не нужен — таймер разберётся
     }
 
     @Test

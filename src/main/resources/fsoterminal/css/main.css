@@ -92,11 +92,16 @@
 .send-progress-bar {
     -fx-pref-height: 3;
     -fx-background-radius: 2;
-    -fx-accent: rgba(255,255,255,0.6);
+    -fx-accent: #0078d7;
 }
 
-.bubble-received .send-progress-bar {
-    -fx-accent: #0078d7;
+.bubble-sent .send-progress-bar > .track {
+    -fx-background-color: rgba(255,255,255,0.25);
+    -fx-background-radius: 2;
+}
+.bubble-sent .send-progress-bar > .bar {
+    -fx-background-color: rgba(255,255,255,0.85);
+    -fx-background-radius: 2;
 }
 
 .file-name-label {
@@ -115,11 +120,17 @@
 .file-progress-bar {
     -fx-pref-height: 8;
     -fx-background-radius: 4;
-    -fx-accent: rgba(255,255,255,0.8);
+    -fx-accent: #0078d7;
 }
 
-.bubble-received .file-progress-bar {
-    -fx-accent: #0078d7;
+/* В синем пузыре: белый трек и белое заполнение */
+.bubble-sent .file-progress-bar > .track {
+    -fx-background-color: rgba(255,255,255,0.3);
+    -fx-background-radius: 4;
+}
+.bubble-sent .file-progress-bar > .bar {
+    -fx-background-color: rgba(255,255,255,0.9);
+    -fx-background-radius: 4;
 }
 
 .file-size-label {
@@ -159,6 +170,32 @@
 
 .bubble-received .voice-progress-bar {
     -fx-accent: #0078d7;
+}
+
+/* --- Кнопка отмены передачи --- */
+
+.btn-cancel {
+    -fx-min-width: 18;
+    -fx-min-height: 18;
+    -fx-padding: 0 4 0 4;
+    -fx-font-size: 10px;
+    -fx-background-radius: 9;
+    -fx-cursor: hand;
+    -fx-text-fill: rgba(100,100,100,0.6);
+}
+
+.bubble-sent .btn-cancel {
+    -fx-text-fill: rgba(255,255,255,0.5);
+    -fx-background-color: rgba(255,255,255,0.15);
+}
+
+/* --- RTT-метка --- */
+
+.rtt-label {
+    -fx-text-fill: white;
+    -fx-font-size: 11px;
+    -fx-padding: 0 0 0 8;
+    -fx-min-width: 80px;
 }
 
 /* --- Панель ввода --- */
