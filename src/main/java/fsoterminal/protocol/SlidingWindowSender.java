@@ -65,6 +65,11 @@ public class SlidingWindowSender {
     }
 
     private synchronized void doSend(int type, byte[] payload) {
+        // При первом кадре в пустом окне сбрасываем таймер на текущее время.
+        // Без этого lastAckAdvanceMs=0 → таймер видит огромный silentMs → сразу
+        // ретрансмитит всё окно прежде чем придут ACK, перегружая буфер STM32.
+        if (next == base) lastAckAdvanceMs = System.currentTimeMillis();
+
         int slot  = next % windowSize;
         byte[] frame = FrameCodec.encode(next & 0xFF, type, payload);
         slots[slot]     = frame;

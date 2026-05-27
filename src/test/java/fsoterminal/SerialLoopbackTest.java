@@ -34,7 +34,10 @@ class SerialLoopbackTest {
     private static final String PORT_A  = System.getProperty("serial.port.a", "COM10");
     private static final String PORT_B  = System.getProperty("serial.port.b", "COM11");
     private static final int    BAUD    = 115200;
-    private static final int    WINDOW  = 8;
+    // Window=4 оптимален для FSO: BDP=390 байт ≈ 1.5 фрейма; burst 4×255=1020 байт
+    // умещается в буфер STM32. Window=8 (burst 2040 байт) переполняет STM32 при
+    // ретрансмите и приводит к побайтовым дропам → порча данных.
+    private static final int    WINDOW  = 4;
     private static final int    RT_MS   = 400; // таймаут ретрансмита (мс)
 
     private SerialChannel chanA, chanB;
@@ -202,11 +205,13 @@ class SerialLoopbackTest {
         sender.setDaemon(true);
         sender.start();
 
-        waitFor(() -> received.get() != null, 60_000);
+        // На FSO (24 кбит/с) теоретически ~4с, с учётом потерь допускаем до 120с
+        waitFor(() -> received.get() != null, 120_000);
         long elapsedMs = System.currentTimeMillis() - startMs;
 
-        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с%n",
-            elapsedMs / 1000.0, fileData.length / (elapsedMs / 1000.0));
+        double bps = fileData.length / (elapsedMs / 1000.0);
+        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с (%.1f%% от 3000)%n",
+            elapsedMs / 1000.0, bps, bps / 3000.0 * 100);
 
         assertNotNull(received.get(), "Файл не получен за 60 секунд");
         assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
