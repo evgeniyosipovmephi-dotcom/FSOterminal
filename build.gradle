@@ -33,3 +33,51 @@ compileJava.options.encoding = 'UTF-8'
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
 }
+
+// ============================================================
+// jpackage: создаёт Windows .exe установщик
+// Запуск: gradlew.bat jpackage
+// Требует WiX Toolset (https://wixtoolset.org) для --type exe
+// Для простого portable-запуска: --type app-image
+// ============================================================
+task jpackage(type: Exec, dependsOn: installDist) {
+    def javaHome = System.getenv('JAVA_HOME') ?: 'C:\\Program Files\\BellSoft\\LibericaJDK-21-Full'
+    def distLib  = "${buildDir}/install/${project.name}/lib"
+    def destDir  = "${buildDir}/dist"
+    def appVer   = '1.0.0'
+
+    doFirst { mkdir destDir }
+
+    // app-image — не требует WiX, создаёт portable папку
+    commandLine "${javaHome}/bin/jpackage",
+        '--type',        'app-image',
+        '--name',        'FSOTerminal',
+        '--app-version', appVer,
+        '--input',       distLib,
+        '--main-jar',    jar.archiveFileName.get(),
+        '--main-class',  'fsoterminal.core.Main',
+        '--dest',        destDir,
+        '--java-options', '-Xmx256m'
+}
+
+// Альтернатива: установщик .exe (требует WiX Toolset)
+task jpackageExe(type: Exec, dependsOn: installDist) {
+    def javaHome = System.getenv('JAVA_HOME') ?: 'C:\\Program Files\\BellSoft\\LibericaJDK-21-Full'
+    def distLib  = "${buildDir}/install/${project.name}/lib"
+    def destDir  = "${buildDir}/dist"
+
+    doFirst { mkdir destDir }
+
+    commandLine "${javaHome}/bin/jpackage",
+        '--type',        'exe',
+        '--name',        'FSOTerminal',
+        '--app-version', '1.0.0',
+        '--input',       distLib,
+        '--main-jar',    jar.archiveFileName.get(),
+        '--main-class',  'fsoterminal.core.Main',
+        '--dest',        destDir,
+        '--win-menu',
+        '--win-shortcut',
+        '--win-dir-chooser',
+        '--java-options', '-Xmx256m'
+}

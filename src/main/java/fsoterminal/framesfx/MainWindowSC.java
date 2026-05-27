@@ -1,5 +1,6 @@
 package fsoterminal.framesfx;
 
+import fsoterminal.audio.AudioRecorder;
 import fsoterminal.channel.SerialChannel;
 import fsoterminal.model.ChatItem;
 import fsoterminal.protocol.*;
@@ -39,6 +40,7 @@ public class MainWindowSC implements Initializable {
     @FXML private Label            lblCharCount;
     @FXML private Button           btnSend;
     @FXML private Button           btnFile;
+    @FXML private Button           btnVoice;
 
     private final ObservableList<ChatItem> chatItems = FXCollections.observableArrayList();
 
@@ -53,6 +55,12 @@ public class MainWindowSC implements Initializable {
 
     /** ChatItem входящего файла/изображения (для обновления прогресса). */
     private ChatItem incomingFileItem;
+
+    // Голос
+    private final AudioRecorder             audioRecorder = new AudioRecorder();
+    private final ScheduledExecutorService  voiceTimerExec =
+        Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r,"voice-timer"); t.setDaemon(true); return t; });
+    private ScheduledFuture<?>              voiceCounterFuture;
 
     // PROBE
     private static final int  PROBE_INTERVAL_SEC = 5;
@@ -199,6 +207,8 @@ public class MainWindowSC implements Initializable {
     }
 
     private void disconnect() {
+        // Остановить запись если идёт
+        if (audioRecorder.isRecording()) stopRecording();
         stopProtocolTimer();
         if (assembler     != null) assembler.reset();
         if (fileAssembler != null) fileAssembler.reset();
@@ -263,13 +273,72 @@ public class MainWindowSC implements Initializable {
         if (file != null) sendFile(file);
     }
 
+    // =========================================================================
+    // Голосовые сообщения
+    // =========================================================================
+
+    @FXML
+    private void onVoiceClicked() {
+        if (audioRecorder.isRecording()) {
+            stopRecording();
+        } else {
+            startRecording();
+        }
+    }
+
+    private void startRecording() {
+        try {
+            audioRecorder.start();
+            btnVoice.setText("⏹ 0:00");
+            btnVoice.setStyle("-fx-text-fill: red;");
+
+            // Обновляем счётчик каждую секунду
+            voiceCounterFuture = voiceTimerExec.scheduleAtFixedRate(() ->
+                Platform.runLater(() -> {
+                    if (audioRecorder.isRecording())
+                        btnVoice.setText("⏹ " +
+                            AudioRecorder.formatDuration(audioRecorder.elapsedSeconds()));
+                }),
+                1, 1, TimeUnit.SECONDS
+            );
+        } catch (Exception e) {
+            addSystem("Микрофон недоступен: " + e.getMessage());
+        }
+    }
+
+    private void stopRecording() {
+        if (voiceCounterFuture != null) { voiceCounterFuture.cancel(false); voiceCounterFuture = null; }
+        btnVoice.setText("🎤");
+        btnVoice.setStyle("");
+
+        Thread t = new Thread(() -> {
+            try {
+                byte[] wav = audioRecorder.stop();
+                if (wav.length <= 44) return; // пустая запись
+
+                // Сохраняем во временный файл
+                String name = "voice_" + System.currentTimeMillis() + ".wav";
+                java.nio.file.Path tmp = java.nio.file.Files.createTempFile("fso_voice_", ".wav");
+                java.nio.file.Files.write(tmp, wav);
+
+                Platform.runLater(() -> sendFile(tmp.toFile()));
+            } catch (Exception e) {
+                Platform.runLater(() -> addSystem("Ошибка записи: " + e.getMessage()));
+            }
+        }, "voice-stop");
+        t.setDaemon(true);
+        t.start();
+    }
+
     private void sendFile(File file) {
         byte[] data;
         try { data = Files.readAllBytes(file.toPath()); }
         catch (Exception e) { addSystem("Ошибка чтения: " + e.getMessage()); return; }
 
         String name = file.getName();
-        ChatItem item = ChatItem.fileSent(name, data.length);
+        ChatItem item = ChatItem.isVoiceName(name)
+            ? ChatItem.voiceSent(name, data.length)
+            : ChatItem.fileSent(name, data.length);
         chatItems.add(item);
         scrollToBottom();
 
@@ -419,6 +488,7 @@ public class MainWindowSC implements Initializable {
             btnConnect.setText(connected ? "Отключить" : "Подключить");
             btnSend.setDisable(!connected);
             btnFile.setDisable(!connected);
+            btnVoice.setDisable(!connected || !AudioRecorder.isMicAvailable());
             txtMessage.setDisable(!connected);
         });
     }

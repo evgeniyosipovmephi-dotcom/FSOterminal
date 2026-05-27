@@ -131,6 +131,36 @@
     -fx-text-fill: rgba(210,230,255,0.85);
 }
 
+/* --- Голосовой пузырь --- */
+
+.btn-play-voice {
+    -fx-background-radius: 16;
+    -fx-min-width: 32;
+    -fx-min-height: 32;
+    -fx-cursor: hand;
+    -fx-font-size: 12px;
+}
+
+.bubble-sent .btn-play-voice {
+    -fx-background-color: rgba(255,255,255,0.25);
+    -fx-text-fill: white;
+}
+
+.bubble-received .btn-play-voice {
+    -fx-background-color: rgba(0,120,215,0.15);
+    -fx-text-fill: #0078d7;
+}
+
+.voice-progress-bar {
+    -fx-pref-height: 6;
+    -fx-background-radius: 3;
+    -fx-accent: rgba(255,255,255,0.7);
+}
+
+.bubble-received .voice-progress-bar {
+    -fx-accent: #0078d7;
+}
+
 /* --- Панель ввода --- */
 
 .input-bar {

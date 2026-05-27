@@ -51,6 +51,9 @@
             <Button fx:id="btnFile" text="📎" disable="true"
                     onAction="#onFileAttach"
                     styleClass="btn-attach" focusTraversable="false"/>
+            <Button fx:id="btnVoice" text="🎤" disable="true"
+                    onAction="#onVoiceClicked"
+                    styleClass="btn-attach" focusTraversable="false"/>
             <Button fx:id="btnSend" text="Отправить" disable="true"
                     prefWidth="100"/>
         </HBox>

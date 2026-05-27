@@ -17,13 +17,14 @@ import java.util.Set;
  */
 public class ChatItem {
 
-    public enum Kind      { TEXT, FILE, IMAGE }
+    public enum Kind      { TEXT, FILE, IMAGE, VOICE }
     public enum Direction { SENT, RECEIVED, SYSTEM }
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
     private static final Set<String> IMAGE_EXTS =
         Set.of("jpg","jpeg","png","gif","bmp","webp","tiff","tif");
+    private static final Set<String> VOICE_EXTS = Set.of("wav");
 
     public final Kind      kind;
     public final Direction direction;
@@ -89,8 +90,15 @@ public class ChatItem {
     }
 
     public static ChatItem fileReceived(String name, long size) {
-        Kind kind = isImageName(name) ? Kind.IMAGE : Kind.FILE;
+        Kind kind = isImageName(name) ? Kind.IMAGE
+                  : isVoiceName(name) ? Kind.VOICE
+                  : Kind.FILE;
         return new ChatItem(kind, Direction.RECEIVED, null, name, size, true);
+    }
+
+    /** Исходящее голосовое сообщение (уже записанное, идёт отправка). */
+    public static ChatItem voiceSent(String name, long size) {
+        return new ChatItem(Kind.VOICE, Direction.SENT, null, name, size, true);
     }
 
     // -------------------------------------------------------------------------
@@ -114,10 +122,17 @@ public class ChatItem {
     // -------------------------------------------------------------------------
 
     public static boolean isImageName(String name) {
+        return hasExtension(name, IMAGE_EXTS);
+    }
+
+    public static boolean isVoiceName(String name) {
+        return hasExtension(name, VOICE_EXTS);
+    }
+
+    private static boolean hasExtension(String name, Set<String> exts) {
         if (name == null) return false;
         int dot = name.lastIndexOf('.');
-        if (dot < 0) return false;
-        return IMAGE_EXTS.contains(name.substring(dot + 1).toLowerCase());
+        return dot >= 0 && exts.contains(name.substring(dot + 1).toLowerCase());
     }
 
     public static String formatSize(long bytes) {
