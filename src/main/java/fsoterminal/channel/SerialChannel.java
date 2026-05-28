@@ -67,6 +67,7 @@ public class SerialChannel {
         port = SerialPort.getCommPort(systemPortName(portNameOrItem));
         port.setComPortParameters(baudRate, 8, SerialPort.ONE_STOP_BIT, SerialPort.NO_PARITY);
         port.setFlowControl(SerialPort.FLOW_CONTROL_DISABLED);
+        port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0);
 
         port.addDataListener(new SerialPortDataListener() {
             @Override

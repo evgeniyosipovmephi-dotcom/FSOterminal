@@ -33,6 +33,8 @@ public class SlidingWindowSender {
      */
     private volatile long lastAckAdvanceMs = 0;
 
+    private int retransmitCount = 0; // суммарное число повторно отправленных кадров
+
     public SlidingWindowSender(int windowSize, Consumer<byte[]> frameOutput) {
         if (windowSize < 1 || windowSize > 16)
             throw new IllegalArgumentException("windowSize: 1..16");
@@ -135,7 +137,10 @@ public class SlidingWindowSender {
                 for (int j = i + 1; j < inFlight2; j++) {
                     if (confirmed[(base + j) % windowSize]) { gapped = true; break; }
                 }
-                if (gapped) frameOutput.accept(slots[(base + i) % windowSize]);
+                if (gapped) {
+                    retransmitCount++;
+                    frameOutput.accept(slots[(base + i) % windowSize]);
+                }
             }
         }
     }
@@ -148,6 +153,8 @@ public class SlidingWindowSender {
      * Переотправить все неподтверждённые кадры. Вызывается внешним таймером.
      */
     public synchronized void retransmitUnconfirmed() {
+        int count = next - base;
+        retransmitCount += count;
         for (int i = base; i < next; i++)
             frameOutput.accept(slots[i % windowSize]);
     }
@@ -161,5 +168,7 @@ public class SlidingWindowSender {
     public synchronized int  nextSeq()           { return next & 0xFF; }
     public synchronized int  baseSeq()           { return base & 0xFF; }
     /** Когда последний раз base продвинулся (ACK освободил кредит). */
-    public long              getLastAckAdvanceMs() { return lastAckAdvanceMs; }
+    public long              getLastAckAdvanceMs()  { return lastAckAdvanceMs; }
+    /** Суммарное число повторно отправленных кадров с момента создания объекта. */
+    public synchronized int  getRetransmitCount()   { return retransmitCount; }
 }

@@ -34,10 +34,14 @@ class SerialLoopbackTest {
     private static final String PORT_A  = System.getProperty("serial.port.a", "COM10");
     private static final String PORT_B  = System.getProperty("serial.port.b", "COM11");
     private static final int    BAUD    = 115200;
-    // Window=4 оптимален для FSO: BDP=390 байт ≈ 1.5 фрейма; burst 4×255=1020 байт
-    // умещается в буфер STM32. Window=8 (burst 2040 байт) переполняет STM32 при
-    // ретрансмите и приводит к побайтовым дропам → порча данных.
-    private static final int    WINDOW  = 4;
+    // Window=1: единственный безопасный вариант для FSO 24 кбод.
+    // BDP = 2400 байт/с × RTT(108 мс) = 259 байт ≈ 1 кадр → оптимум = WINDOW=1.
+    // При WINDOW=2 буфер STM32 (512 байт) переполняется: когда ACK за первый кадр
+    // приходит в 108 мс, в буфере ещё ~250 байт остатка; отправка следующих двух
+    // кадров (510 байт) даёт 760 байт > 512 → дропы → ретрансмиты → скорость 23%.
+    // WINDOW=1: кадр уходит за 106 мс, ACK в 108 мс, буфер пуст → 0 ретрансмитов,
+    // throughput 250/108мс = 2315 байт/с (96.5% от 2400).
+    private static final int    WINDOW  = 1;
     private static final int    RT_MS   = 400; // таймаут ретрансмита (мс)
 
     private SerialChannel chanA, chanB;
@@ -169,9 +173,9 @@ class SerialLoopbackTest {
 
     /**
      * Передача файла 10 KB по реальному COM-порту.
-     * Проверяет байт-в-байт целостность и замеряет фактическое время.
-     * Теоретический минимум: 43 кадра × 255 байт / ~11520 байт/с ≈ 0.95 с.
-     * (115200 бод ≈ 11520 байт/с с учётом стоп-бита)
+     * Проверяет байт-в-байт целостность, замеряет скорость и считает ретрансмиты.
+     * Теоретический максимум FSO 24000 бод (8N1): 24000/10 = 2400 байт/с.
+     * На проводном канале (нет потерь) ретрансмитов должно быть 0.
      */
     @Test
     void fileTransfer_10KB_AtoB() throws Exception {
@@ -205,15 +209,70 @@ class SerialLoopbackTest {
         sender.setDaemon(true);
         sender.start();
 
-        // На FSO (24 кбит/с) теоретически ~4с, с учётом потерь допускаем до 120с
+        // FSO 24 кбод: теор. ~4.3 с, допускаем до 120 с
         waitFor(() -> received.get() != null, 120_000);
         long elapsedMs = System.currentTimeMillis() - startMs;
 
+        // Теоретический максимум: 24000 бод / 10 бит на байт (8N1) = 2400 байт/с
+        double theoreticalBps = 2400.0;
         double bps = fileData.length / (elapsedMs / 1000.0);
-        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с (%.1f%% от 3000)%n",
-            elapsedMs / 1000.0, bps, bps / 3000.0 * 100);
+        int retransmits = senderA.getRetransmitCount();
+        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с (%.1f%% от %.0f)%n",
+            elapsedMs / 1000.0, bps, bps / theoreticalBps * 100, theoreticalBps);
+        System.out.printf("[10KB serial] Ретрансмитов: %d%s%n",
+            retransmits, retransmits == 0 ? " — канал чистый" : " — ВНИМАНИЕ: потери на проводном канале!");
 
-        assertNotNull(received.get(), "Файл не получен за 60 секунд");
+        assertNotNull(received.get(), "Файл не получен за 120 секунд");
+        assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
+        assertEquals(0, retransmits, "На проводном канале ретрансмитов быть не должно");
+    }
+
+    /**
+     * Передача файла 100 KB по реальному COM-порту.
+     * Теоретический минимум при 115200: ~9 с; при FSO 24 кбит/с: ~35 с.
+     * Допускаем до 600 с (10 мин) чтобы тест не падал на медленном канале.
+     */
+    @Test
+    void fileTransfer_100KB_AtoB() throws Exception {
+        byte[] fileData = new byte[100 * 1024]; // 102400 байт
+        for (int i = 0; i < fileData.length; i++) fileData[i] = (byte)(i * 97 + 31);
+        String fileName = "test100k.bin";
+
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
+        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
+        ackB.setDataHandler(receiverB::onFrame);
+
+        long startMs = System.currentTimeMillis();
+
+        Thread sender = new Thread(() -> {
+            try {
+                senderA.trySend(FrameCodec.TYPE_FILE_BEGIN,
+                    encodeFileBegin(fileName, fileData.length), 30_000);
+                int off = 0;
+                while (off < fileData.length) {
+                    int len = Math.min(FrameCodec.MAX_PAYLOAD, fileData.length - off);
+                    senderA.trySend(FrameCodec.TYPE_FILE_DATA,
+                        Arrays.copyOfRange(fileData, off, off + len), 30_000);
+                    off += len;
+                }
+                senderA.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 30_000);
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "file-send-100k");
+        sender.setDaemon(true);
+        sender.start();
+
+        waitFor(() -> received.get() != null, 600_000); // до 10 мин
+        long elapsedMs = System.currentTimeMillis() - startMs;
+
+        double bps    = fileData.length / (elapsedMs / 1000.0);
+        int    frames = 1 + (int) Math.ceil((double) fileData.length / FrameCodec.MAX_PAYLOAD) + 1;
+        System.out.printf("%n[100KB serial] Время: %.2f с | Скорость: %.0f байт/с | Фреймов теор: %d%n",
+            elapsedMs / 1000.0, bps, frames);
+        System.out.printf("[100KB serial] Эффективность: %.1f%% (от 115200 бод ≈ 11520 байт/с)%n",
+            bps / 11520.0 * 100);
+
+        assertNotNull(received.get(), "Файл не получен за 10 минут");
         assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
     }
 
