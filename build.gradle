@@ -48,7 +48,7 @@ task jpackage(type: Exec, dependsOn: installDist) {
     def javaHome = System.getenv('JAVA_HOME') ?: 'C:\\Program Files\\BellSoft\\LibericaJDK-21-Full'
     def distLib  = "${buildDir}/install/${project.name}/lib"
     def destDir  = "${buildDir}/dist"
-    def appVer   = '1.1.0'
+    def appVer   = '1.2.0'
 
     doFirst { mkdir destDir }
 

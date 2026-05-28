@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -103,16 +104,8 @@ class SerialLoopbackTest {
 
     // =========================================================================
 
-    /** A отправляет короткое сообщение → B принимает. */
-    @Test
-    void singleMessage_AtoB() throws Exception {
-        String msg = "Привет с COM" + PORT_A.replace("COM","");
-        sendText(senderA, msg);
-
-        waitFor(() -> !deliveredToB.isEmpty(), 3000);
-        assertEquals(1, deliveredToB.size());
-        assertEquals(msg, deliveredToB.get(0));
-    }
+    @Test void singleMessage_AtoB() throws Exception { doSingleMessage(senderA, deliveredToB, "A→B"); }
+    @Test void singleMessage_BtoA() throws Exception { doSingleMessage(senderB, deliveredToA, "B→A"); }
 
     /** Двустороннее: A→B и B→A одновременно. */
     @Test
@@ -125,155 +118,238 @@ class SerialLoopbackTest {
         assertEquals(10, deliveredToA.size());
     }
 
-    /** Большое сообщение (несколько кадров). */
-    @Test
-    void largeText_multiFrame() throws Exception {
-        String msg = "Кирилл".repeat(100); // ~600 байт UTF-8 → 3 кадра
-        sendText(senderA, msg);
+    @Test void largeText_AtoB() throws Exception { doLargeText(senderA, deliveredToB, "A→B"); }
+    @Test void largeText_BtoA() throws Exception { doLargeText(senderB, deliveredToA, "B→A"); }
 
-        waitFor(() -> !deliveredToB.isEmpty(), 5000);
-        assertEquals(1, deliveredToB.size());
-        assertEquals(msg, deliveredToB.get(0));
+    @Test void fileTransfer_4KB_AtoB() throws Exception { doFileTransfer4KB(senderA, chanB, ackB, "A→B"); }
+    @Test void fileTransfer_4KB_BtoA() throws Exception { doFileTransfer4KB(senderB, chanA, ackA, "B→A"); }
+
+    @Test void fileTransfer_10KB_AtoB() throws Exception { doFileTransfer10KB(senderA, chanB, ackB, "A→B"); }
+    @Test void fileTransfer_10KB_BtoA() throws Exception { doFileTransfer10KB(senderB, chanA, ackA, "B→A"); }
+
+    @Test void fileTransfer_100KB_AtoB() throws Exception { doFileTransfer100KB(senderA, chanB, ackB, "A→B"); }
+    @Test void fileTransfer_100KB_BtoA() throws Exception { doFileTransfer100KB(senderB, chanA, ackA, "B→A"); }
+
+    // =========================================================================
+    // Хелперы тестов
+    // =========================================================================
+
+    private void doSingleMessage(SlidingWindowSender sender, List<String> delivered, String label) throws Exception {
+        String msg = "Привет " + label;
+        sendText(sender, msg);
+        waitFor(() -> !delivered.isEmpty(), 5_000);
+        assertEquals(1, delivered.size());
+        assertEquals(msg, delivered.get(0));
     }
 
-    /** Передача бинарного файла 4 KB: A→B. */
-    @Test
-    void fileTransfer_4KB_AtoB() throws Exception {
+    private void doLargeText(SlidingWindowSender sender, List<String> delivered, String label) throws Exception {
+        String msg = "Кирилл".repeat(100); // ~600 байт UTF-8 → несколько кадров
+        sendText(sender, msg);
+        waitFor(() -> !delivered.isEmpty(), 10_000);
+        assertEquals(1, delivered.size());
+        assertEquals(msg, delivered.get(0));
+    }
+
+    /** Передача 4 KB бинарного файла, проверка байт-в-байт. */
+    private void doFileTransfer4KB(SlidingWindowSender sender, SerialChannel chanRecv,
+                                   AckProcessor ackRecv, String label) throws Exception {
         byte[] fileData = new byte[4096];
         for (int i = 0; i < fileData.length; i++) fileData[i] = (byte)(i * 13 + 7);
-        String fileName = "test4k.bin";
 
-        // FileAssembler на стороне B
         AtomicReference<byte[]> received = new AtomicReference<>();
-        FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
-        // Переподключаем диспетчер B (для этого теста)
-        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
-        ackB.setDataHandler(receiverB::onFrame);
+        FileAssembler fa = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
+        ackRecv.setDataHandler(new SlidingWindowReceiver(WINDOW, chanRecv::send, fa::onFrame)::onFrame);
 
-        // Отправка файла
-        Thread sender = new Thread(() -> {
-            try {
-                senderA.trySend(FrameCodec.TYPE_FILE_BEGIN, encodeFileBegin(fileName, fileData.length), 10_000);
-                int off = 0;
-                while (off < fileData.length) {
-                    int len = Math.min(FrameCodec.MAX_PAYLOAD, fileData.length - off);
-                    senderA.trySend(FrameCodec.TYPE_FILE_DATA, Arrays.copyOfRange(fileData, off, off + len), 10_000);
-                    off += len;
-                }
-                senderA.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 10_000);
-            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }, "file-send");
-        sender.setDaemon(true);
-        sender.start();
+        Thread t = fileSendThread(sender, "test4k.bin", fileData, "4k-" + label);
+        t.start();
 
         waitFor(() -> received.get() != null, 30_000);
-        assertNotNull(received.get(), "Файл не получен");
-        assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
+        assertNotNull(received.get(),              "[" + label + "] Файл не получен");
+        assertArrayEquals(fileData, received.get(),"[" + label + "] Данные повреждены");
     }
 
     /**
-     * Передача файла 10 KB по реальному COM-порту.
-     * Проверяет байт-в-байт целостность, замеряет скорость и считает ретрансмиты.
-     * Теоретический максимум FSO 24000 бод (8N1): 24000/10 = 2400 байт/с.
-     * На проводном канале (нет потерь) ретрансмитов должно быть 0.
+     * Передача 10 KB: проверка целостности + скорость + ретрансмиты.
+     * Теор. макс. FSO 24000 бод (8N1) = 2400 байт/с.
      */
-    @Test
-    void fileTransfer_10KB_AtoB() throws Exception {
+    private void doFileTransfer10KB(SlidingWindowSender sender, SerialChannel chanRecv,
+                                    AckProcessor ackRecv, String label) throws Exception {
         byte[] fileData = new byte[10_240];
         for (int i = 0; i < fileData.length; i++) fileData[i] = (byte)(i * 131 + 17);
-        String fileName = "test10k.bin";
 
-        // FileAssembler на стороне B
         AtomicReference<byte[]> received = new AtomicReference<>();
-        FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
-        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
-        ackB.setDataHandler(receiverB::onFrame);
+        FileAssembler fa = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
+        ackRecv.setDataHandler(new SlidingWindowReceiver(WINDOW, chanRecv::send, fa::onFrame)::onFrame);
 
         long startMs = System.currentTimeMillis();
+        Thread t = fileSendThread(sender, "test10k.bin", fileData, "10k-" + label);
+        t.start();
 
-        // Отправка файла в отдельном потоке (trySend блокирует на семафоре)
-        Thread sender = new Thread(() -> {
-            try {
-                senderA.trySend(FrameCodec.TYPE_FILE_BEGIN,
-                    encodeFileBegin(fileName, fileData.length), 10_000);
-                int off = 0;
-                while (off < fileData.length) {
-                    int len = Math.min(FrameCodec.MAX_PAYLOAD, fileData.length - off);
-                    senderA.trySend(FrameCodec.TYPE_FILE_DATA,
-                        Arrays.copyOfRange(fileData, off, off + len), 10_000);
-                    off += len;
-                }
-                senderA.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 10_000);
-            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }, "file-send-10k");
-        sender.setDaemon(true);
-        sender.start();
-
-        // FSO 24 кбод: теор. ~4.3 с, допускаем до 120 с
         waitFor(() -> received.get() != null, 120_000);
         long elapsedMs = System.currentTimeMillis() - startMs;
 
-        // Теоретический максимум: 24000 бод / 10 бит на байт (8N1) = 2400 байт/с
-        double theoreticalBps = 2400.0;
-        double bps = fileData.length / (elapsedMs / 1000.0);
-        int retransmits = senderA.getRetransmitCount();
-        System.out.printf("%n[10KB serial] Время: %.2f с | Скорость: %.0f байт/с (%.1f%% от %.0f)%n",
-            elapsedMs / 1000.0, bps, bps / theoreticalBps * 100, theoreticalBps);
-        System.out.printf("[10KB serial] Ретрансмитов: %d%s%n",
-            retransmits, retransmits == 0 ? " — канал чистый" : " — ВНИМАНИЕ: потери на проводном канале!");
+        double bps         = fileData.length / (elapsedMs / 1000.0);
+        int    retransmits = sender.getRetransmitCount();
+        System.out.printf("%n[10KB %s] Время: %.2f с | Скорость: %.0f байт/с (%.1f%% от 2400)%n",
+            label, elapsedMs / 1000.0, bps, bps / 2400.0 * 100);
+        System.out.printf("[10KB %s] Ретрансмитов: %d%s%n",
+            label, retransmits, retransmits == 0 ? " — канал чистый" : " — ВНИМАНИЕ!");
 
-        assertNotNull(received.get(), "Файл не получен за 120 секунд");
-        assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
-        assertEquals(0, retransmits, "На проводном канале ретрансмитов быть не должно");
+        assertNotNull(received.get(),               "[" + label + "] Файл не получен за 120 с");
+        assertArrayEquals(fileData, received.get(), "[" + label + "] Данные повреждены");
+        assertEquals(0, retransmits,                "[" + label + "] Ретрансмитов быть не должно");
     }
 
-    /**
-     * Передача файла 100 KB по реальному COM-порту.
-     * Теоретический минимум при 115200: ~9 с; при FSO 24 кбит/с: ~35 с.
-     * Допускаем до 600 с (10 мин) чтобы тест не падал на медленном канале.
-     */
-    @Test
-    void fileTransfer_100KB_AtoB() throws Exception {
-        byte[] fileData = new byte[100 * 1024]; // 102400 байт
+    /** Передача 100 KB: скорость и целостность. */
+    private void doFileTransfer100KB(SlidingWindowSender sender, SerialChannel chanRecv,
+                                     AckProcessor ackRecv, String label) throws Exception {
+        byte[] fileData = new byte[100 * 1024];
         for (int i = 0; i < fileData.length; i++) fileData[i] = (byte)(i * 97 + 31);
-        String fileName = "test100k.bin";
 
         AtomicReference<byte[]> received = new AtomicReference<>();
-        FileAssembler faB = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
-        receiverB = new SlidingWindowReceiver(WINDOW, chanB::send, faB::onFrame);
-        ackB.setDataHandler(receiverB::onFrame);
+        FileAssembler fa = new FileAssembler((n,s)->{}, (r,t)->{}, (n,d)->received.set(d));
+        ackRecv.setDataHandler(new SlidingWindowReceiver(WINDOW, chanRecv::send, fa::onFrame)::onFrame);
 
         long startMs = System.currentTimeMillis();
+        Thread t = fileSendThread(sender, "test100k.bin", fileData, "100k-" + label);
+        t.start();
 
-        Thread sender = new Thread(() -> {
-            try {
-                senderA.trySend(FrameCodec.TYPE_FILE_BEGIN,
-                    encodeFileBegin(fileName, fileData.length), 30_000);
-                int off = 0;
-                while (off < fileData.length) {
-                    int len = Math.min(FrameCodec.MAX_PAYLOAD, fileData.length - off);
-                    senderA.trySend(FrameCodec.TYPE_FILE_DATA,
-                        Arrays.copyOfRange(fileData, off, off + len), 30_000);
-                    off += len;
-                }
-                senderA.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 30_000);
-            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }, "file-send-100k");
-        sender.setDaemon(true);
-        sender.start();
-
-        waitFor(() -> received.get() != null, 600_000); // до 10 мин
+        waitFor(() -> received.get() != null, 600_000);
         long elapsedMs = System.currentTimeMillis() - startMs;
 
         double bps    = fileData.length / (elapsedMs / 1000.0);
         int    frames = 1 + (int) Math.ceil((double) fileData.length / FrameCodec.MAX_PAYLOAD) + 1;
-        System.out.printf("%n[100KB serial] Время: %.2f с | Скорость: %.0f байт/с | Фреймов теор: %d%n",
-            elapsedMs / 1000.0, bps, frames);
-        System.out.printf("[100KB serial] Эффективность: %.1f%% (от 115200 бод ≈ 11520 байт/с)%n",
-            bps / 11520.0 * 100);
+        System.out.printf("%n[100KB %s] Время: %.2f с | Скорость: %.0f байт/с | Кадров теор: %d%n",
+            label, elapsedMs / 1000.0, bps, frames);
+        System.out.printf("[100KB %s] %.1f%% от теор. 2400 байт/с%n",
+            label, bps / 2400.0 * 100);
 
-        assertNotNull(received.get(), "Файл не получен за 10 минут");
-        assertArrayEquals(fileData, received.get(), "Данные файла повреждены");
+        assertNotNull(received.get(),               "[" + label + "] Файл не получен за 10 мин");
+        assertArrayEquals(fileData, received.get(), "[" + label + "] Данные повреждены");
+    }
+
+    /** Запускает отправку файла в отдельном потоке. */
+    private Thread fileSendThread(SlidingWindowSender sender, String name, byte[] data, String threadLabel) {
+        Thread t = new Thread(() -> {
+            try {
+                sender.trySend(FrameCodec.TYPE_FILE_BEGIN, encodeFileBegin(name, data.length), 30_000);
+                int off = 0;
+                while (off < data.length) {
+                    int len = Math.min(FrameCodec.MAX_PAYLOAD, data.length - off);
+                    sender.trySend(FrameCodec.TYPE_FILE_DATA,
+                        Arrays.copyOfRange(data, off, off + len), 30_000);
+                    off += len;
+                }
+                sender.trySend(FrameCodec.TYPE_FILE_END, new byte[0], 30_000);
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "file-send-" + threadLabel);
+        t.setDaemon(true);
+        return t;
+    }
+
+    // =========================================================================
+
+    /**
+     * Sweep-тест: перебирает payload от 20 до 240 байт и замеряет throughput
+     * на реальном железе. Передаёт по 3 KB на каждый размер.
+     *
+     * Запуск:
+     *   gradlew.bat test -Dserial.test.enabled=true ^
+     *       --tests "fsoterminal.SerialLoopbackTest.frameSize_throughputSweep"
+     *
+     * Пример вывода:
+     *   P,B   Кадров  Время,с  байт/с     % теор  Ретр.
+     *   20    150     10.50    285        11.9%   0
+     *   ...
+     *   240   13       1.50   2000        83.3%   0
+     *   Лучший: payload=240 → 2000 байт/с (83.3%)
+     */
+    @Test
+    void frameSize_throughputSweep() throws Exception {
+        int[] payloads   = {20, 40, 60, 80, 100, 120, 150, 180, 210, 240};
+        int   totalBytes = 3_000;
+
+        System.out.println("\n[Frame Sweep] Зависимость throughput от размера payload");
+        System.out.printf("  %-5s  %-7s  %-8s  %-10s  %-7s  %-6s%n",
+            "P,B", "Кадров", "Время,с", "байт/с", "% теор", "Ретр.");
+        System.out.println("  " + "─".repeat(52));
+
+        int    bestPs  = 0;
+        double bestBps = 0;
+
+        for (int ps : payloads) {
+            long[] r = doSweep(ps, totalBytes);
+            // r[0]=elapsedMs  r[1]=frameCount  r[2]=retransmits
+            double bps = totalBytes / (r[0] / 1000.0);
+            double pct = bps / 2400.0 * 100;
+            System.out.printf("  %-5d  %-7d  %-8.2f  %-10.0f  %-7.1f  %-6d%s%n",
+                ps, r[1], r[0] / 1000.0, bps, pct, r[2],
+                r[2] > 0 ? " ⚠" : "");
+            if (bps > bestBps) { bestBps = bps; bestPs = ps; }
+            Thread.sleep(500); // пауза между замерами
+        }
+
+        System.out.println("  " + "─".repeat(52));
+        System.out.printf("  Лучший: payload=%d байт → %.0f байт/с (%.1f%% от теор.)%n",
+            bestPs, bestBps, bestBps / 2400.0 * 100);
+        System.out.println("  Теор. макс: 2400 байт/с (FSO 24 кбод, 8N1)");
+    }
+
+    /**
+     * Передаёт totalBytes кусками по payloadSize байт (TYPE_FILE_DATA) от A к B.
+     *
+     * @return long[]{elapsedMs, frameCount, retransmits}
+     */
+    private long[] doSweep(int payloadSize, int totalBytes) throws Exception {
+        // Свежие объекты протокола для каждой итерации
+        SlidingWindowSender sA = new SlidingWindowSender(WINDOW, chanA::send);
+
+        // Dummy-sender для ackB2: ACK от A к B не приходят (A только шлёт данные),
+        // но null вызвал бы NPE в handleAck при случайных остатках → безопаснее no-op.
+        SlidingWindowSender dummyB = new SlidingWindowSender(1, b -> {});
+        AtomicInteger receivedBytesB = new AtomicInteger();
+
+        SlidingWindowReceiver rB = new SlidingWindowReceiver(WINDOW, chanB::send,
+            frame -> {
+                if (frame.type == FrameCodec.TYPE_FILE_DATA)
+                    receivedBytesB.addAndGet(frame.payload.length);
+            });
+
+        AckProcessor ackA2 = new AckProcessor(sA);
+        AckProcessor ackB2 = new AckProcessor(dummyB);
+        ackA2.setDataHandler(f -> {});   // A в этом тесте данные не принимает
+        ackB2.setDataHandler(rB::onFrame);
+
+        chanA.setReceiveHandler(ackA2::feed);
+        chanB.setReceiveHandler(ackB2::feed);
+
+        // Тестовые данные
+        byte[] data = new byte[totalBytes];
+        for (int i = 0; i < data.length; i++) data[i] = (byte)(i * 71 + 13);
+
+        ScheduledExecutorService timer = startRetransmitTimer(sA);
+        long startMs = System.currentTimeMillis();
+
+        int frames = 0, off = 0;
+        while (off < data.length) {
+            int len = Math.min(payloadSize, data.length - off);
+            sA.trySend(FrameCodec.TYPE_FILE_DATA,
+                Arrays.copyOfRange(data, off, off + len), 30_000);
+            off += len;
+            frames++;
+        }
+
+        // Ждём: B принял все байты И последний ACK вернулся к A
+        waitFor(() -> receivedBytesB.get() >= totalBytes && sA.inFlight() == 0, 120_000);
+        long elapsed = System.currentTimeMillis() - startMs;
+
+        timer.shutdownNow();
+
+        // Восстанавливаем обработчики, созданные в setUp
+        chanA.setReceiveHandler(ackA::feed);
+        chanB.setReceiveHandler(ackB::feed);
+
+        return new long[]{ elapsed, frames, sA.getRetransmitCount() };
     }
 
     // =========================================================================

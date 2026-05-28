@@ -4,7 +4,7 @@ package fsoterminal.protocol;
  * Кодирует и декодирует кадры протокола FSO Terminal.
  *
  * Формат кадра:
- *   [SOF 0x7E] [SEQ 1B] [TYPE 1B] [LEN 1B] [PAYLOAD 0..250B] [CRC8 1B]
+ *   [SOF 0xAA] [SEQ 1B] [TYPE 1B] [LEN 1B] [PAYLOAD 0..250B] [CRC8 1B]
  *
  * LEN — длина PAYLOAD в байтах (0..250).
  * CRC-8 (poly 0x07) считается над SEQ+TYPE+LEN+PAYLOAD.
@@ -12,11 +12,11 @@ package fsoterminal.protocol;
  */
 public class FrameCodec {
 
-    public static final byte SOF       = 0x7E;
+    public static final byte SOF       = (byte) 0xAA; // 0x7E → 0xAA: PtPP2 не стаффирует 0xAA
     public static final int  HEADER    = 4;   // SOF + SEQ + TYPE + LEN
     public static final int  TRAILER   = 1;   // CRC8
-    public static final int  MAX_PAYLOAD = 250;
-    public static final int  MAX_FRAME   = HEADER + MAX_PAYLOAD + TRAILER; // 255
+    public static final int  MAX_PAYLOAD = 240; // оптимум по sweep-тесту; кадр=245 байт < лимит STM32 (255)
+    public static final int  MAX_FRAME   = HEADER + MAX_PAYLOAD + TRAILER; // 245
 
     // Типы кадров
     public static final int TYPE_DATA       = 0x01;
