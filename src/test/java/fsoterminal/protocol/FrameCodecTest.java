@@ -15,9 +15,9 @@ class FrameCodecTest {
 
     @Test
     void encode_headerFieldsCorrect() {
-        byte[] frame = FrameCodec.encode(42, FrameCodec.TYPE_ACK, new byte[]{(byte)0xAA});
-        assertEquals(42,                  frame[1] & 0xFF); // SEQ
-        assertEquals(FrameCodec.TYPE_ACK, frame[2] & 0xFF); // TYPE
+        byte[] frame = FrameCodec.encode(42, FrameCodec.TYPE_PROBE, new byte[]{(byte)0xAA});
+        assertEquals(42,                    frame[1] & 0xFF); // SEQ
+        assertEquals(FrameCodec.TYPE_PROBE, frame[2] & 0xFF); // TYPE
         assertEquals(1,                   frame[3] & 0xFF); // LEN
     }
 
@@ -43,8 +43,9 @@ class FrameCodecTest {
 
     @Test
     void encode_maxPayload_fits255() {
-        // MAX_PAYLOAD=250 + HEADER=4 + TRAILER=1 = 255 ровно
-        assertEquals(255, FrameCodec.MAX_FRAME);
+        // MAX_PAYLOAD=240 + HEADER=4 + TRAILER=1 = 245 ≤ 255 (лимит пакета STM32)
+        assertEquals(245, FrameCodec.MAX_FRAME);
+        assertTrue(FrameCodec.MAX_FRAME <= 255, "кадр должен влезать в лимит STM32 (255 Б)");
     }
 
     @Test
