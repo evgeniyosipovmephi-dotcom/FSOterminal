@@ -15,12 +15,16 @@ import java.util.function.DoubleConsumer;
  */
 public class BulkSender {
 
+    private static final int RTT_MARGIN_MS = 2000; // запас сверх времени слива очереди
+    private static final int MAX_RETRIES   = 10;   // повторов END без ответа → обрыв
+
     private final PacedTransmitter tx;
     private final ProtocolConfig   cfg;
     private final BlockingQueue<FrameCodec.Frame> inbox = new LinkedBlockingQueue<>();
 
     private volatile boolean cancelled = false;
-    private int seq = 0;
+    private long delayMs = 20;   // текущая задержка пейсинга (из pacingMs)
+    private int  seq     = 0;
 
     public BulkSender(PacedTransmitter tx, ProtocolConfig cfg) {
         this.tx  = tx;
@@ -69,9 +73,9 @@ public class BulkSender {
         int totalFrames = (int) Math.ceil((double) data.length / BulkProtocol.DATA_BYTES);
         int numBlocks   = Math.max(1, (int) Math.ceil((double) totalFrames / BulkProtocol.BLOCK_FRAMES));
 
-        long delay = BulkProtocol.pacingMs(
+        delayMs = BulkProtocol.pacingMs(
             BulkProtocol.dataFrameLen(BulkProtocol.DATA_BYTES), cfg.bulkOverdriveMs);
-        tx.setDataDelayMs(delay);
+        tx.setDataDelayMs(delayMs);
 
         // FILE_BEGIN ×3 (идемпотентно, дублёр на случай потери первого)
         byte[] begin = encodeFileBegin(kind, name, data.length, numBlocks);
@@ -82,22 +86,29 @@ public class BulkSender {
             int base  = b * BulkProtocol.BLOCK_FRAMES;
             int count = Math.min(BulkProtocol.BLOCK_FRAMES, totalFrames - base);
 
-            sendBlock(b, base, count, data, null);
+            int sent = sendBlock(b, base, count, data, null);   // сколько DATA-кадров поставлено в очередь
             int retries = 0;
 
             while (true) {
                 if (cancelled) return;
-                FrameCodec.Frame r = inbox.poll(cfg.bulkOverdriveMs > 0 ? 1000 : 1000, TimeUnit.MILLISECONDS);
+                // Ждём, пока очередь сольётся (sent × задержка) + запас на ответ.
+                long waitMs = (long) sent * delayMs + RTT_MARGIN_MS;
+                FrameCodec.Frame r = inbox.poll(waitMs, TimeUnit.MILLISECONDS);
                 if (r == null) {
-                    if (++retries > 10) throw new TransferException("Канал не отвечает (блок " + b + ")");
-                    tx.sendPaced(encodeBlockEnd(b, count));      // потерян END/NACK → повторяем END
+                    if (++retries > MAX_RETRIES)
+                        throw new TransferException("Канал не отвечает (блок " + b + ")");
+                    tx.sendPaced(encodeBlockEnd(b, count));      // END/ответ потерян → повторяем END
+                    sent = 1;                                    // данные уже слиты, ждём только END+RTT
                     continue;
                 }
-                if ((r.payload[0] & 0xFF) != (b & 0xFF)) continue; // ответ другого блока
+                if (r.payload.length < 1 || (r.payload[0] & 0xFF) != (b & 0xFF)) continue; // чужой блок
                 if (r.type == BulkProtocol.TYPE_BLOCK_DONE) break;
                 if (r.type == BulkProtocol.TYPE_NACK) {
                     boolean[] mask = parseNack(r.payload, count);
-                    if (mask != null) { sendBlock(b, base, count, data, mask); retries = 0; }
+                    int miss = 0;
+                    if (mask != null) for (boolean m : mask) if (m) miss++;
+                    if (miss > 0) { sent = sendBlock(b, base, count, data, mask); retries = 0; }
+                    else          { sent = 1; }                  // пустой NACK — ждём DONE ещё круг
                 }
             }
             if (progress != null) progress.accept((double)(b + 1) / numBlocks);
@@ -107,8 +118,12 @@ public class BulkSender {
         for (int i = 0; i < 3; i++) tx.sendPaced(end);            // FILE_END ×3
     }
 
-    /** Отправляет DATA-кадры блока (idx 0..count-1) с пейсингом, затем BLOCK_END. mask=null → все. */
-    private void sendBlock(int blk, int base, int count, byte[] data, boolean[] mask) {
+    /**
+     * Отправляет DATA-кадры блока (idx 0..count-1) с пейсингом, затем BLOCK_END.
+     * mask=null → все. Возвращает число поставленных в очередь DATA-кадров.
+     */
+    private int sendBlock(int blk, int base, int count, byte[] data, boolean[] mask) {
+        int n = 0;
         for (int i = 0; i < count; i++) {
             if (mask != null && !mask[i]) continue;
             int off = (base + i) * BulkProtocol.DATA_BYTES;
@@ -119,8 +134,10 @@ public class BulkSender {
             p[2] = (byte)((i >> 8) & 0xFF);
             System.arraycopy(data, off, p, 3, len);
             tx.sendPaced(FrameCodec.encode(seq++, BulkProtocol.TYPE_DATA, p));
+            n++;
         }
         tx.sendPaced(encodeBlockEnd(blk, count));
+        return n;
     }
 
     private byte[] encodeBlockEnd(int blk, int count) {
