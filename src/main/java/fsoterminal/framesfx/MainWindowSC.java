@@ -530,7 +530,7 @@ public class MainWindowSC implements Initializable {
     private void onHelp() {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle("О программе FSO Terminal");
-        alert.setHeaderText("FSO Terminal 2.0.0  —  оптический терминал связи");
+        alert.setHeaderText("FSO Terminal 2.0.1  —  оптический терминал связи");
         alert.initOwner(chatList.getScene().getWindow());
 
         String savePath = getDownloadPath().toAbsolutePath().toString();
