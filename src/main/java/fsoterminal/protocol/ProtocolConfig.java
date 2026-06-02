@@ -25,5 +25,14 @@ public class ProtocolConfig {
      */
     public String downloadPath = null;
 
+    // ── Bulk-протокол (передача файлов, см. docs/BULK_PROTOCOL_DESIGN.md) ───────
+
+    /**
+     * Over-drive: насколько слать кадры быстрее физического пола FSO, мс.
+     * delay = floor − overdrive. Для кадра 64 Б floor = 31 мс, overdrive 11 → 20 мс
+     * (подтверждённый замерами оптимум throughput). 0 = безопасно по полу.
+     */
+    public int bulkOverdriveMs = 11;
+
     public ProtocolConfig() {}
 }
