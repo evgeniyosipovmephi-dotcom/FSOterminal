@@ -18,16 +18,12 @@ public class FrameCodec {
     public static final int  MAX_PAYLOAD = 240; // оптимум по sweep-тесту; кадр=245 байт < лимит STM32 (255)
     public static final int  MAX_FRAME   = HEADER + MAX_PAYLOAD + TRAILER; // 245
 
-    // Типы кадров
-    public static final int TYPE_DATA       = 0x01;
-    public static final int TYPE_ACK        = 0x02;
-    public static final int TYPE_PROBE      = 0x03;
-    public static final int TYPE_PROBE_RESP = 0x04;
-    public static final int TYPE_FILE_BEGIN   = 0x10;
-    public static final int TYPE_FILE_END    = 0x11;
-    public static final int TYPE_FILE_DATA   = 0x12;
-    public static final int TYPE_FILE_CANCEL = 0x13; // отправитель отменил передачу
-    public static final int TYPE_VOICE       = 0x20;
+    // Типы кадров. FrameCodec — низкоуровневый кодек, типы прикладного уровня
+    // живут в BulkProtocol (0x30+). Здесь только общий образец (TYPE_DATA) и
+    // PROBE-живучесть соединения.
+    public static final int TYPE_DATA       = 0x01; // образец для codec-тестов
+    public static final int TYPE_PROBE      = 0x03; // запрос «жив ли канал»
+    public static final int TYPE_PROBE_RESP = 0x04; // ответ на PROBE
 
     /** Декодированный кадр. */
     public static final class Frame {

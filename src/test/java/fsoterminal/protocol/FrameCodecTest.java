@@ -15,9 +15,9 @@ class FrameCodecTest {
 
     @Test
     void encode_headerFieldsCorrect() {
-        byte[] frame = FrameCodec.encode(42, FrameCodec.TYPE_ACK, new byte[]{(byte)0xAA});
-        assertEquals(42,                  frame[1] & 0xFF); // SEQ
-        assertEquals(FrameCodec.TYPE_ACK, frame[2] & 0xFF); // TYPE
+        byte[] frame = FrameCodec.encode(42, FrameCodec.TYPE_PROBE, new byte[]{(byte)0xAA});
+        assertEquals(42,                    frame[1] & 0xFF); // SEQ
+        assertEquals(FrameCodec.TYPE_PROBE, frame[2] & 0xFF); // TYPE
         assertEquals(1,                   frame[3] & 0xFF); // LEN
     }
 
