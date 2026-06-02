@@ -179,6 +179,7 @@ public class MainWindowSC implements Initializable {
             }),
             p -> { ChatItem it = incomingFileItem; if (it != null) Platform.runLater(() -> it.setProgress(p)); });
         bulkReceiver.setOnBegin((kind, name, size) -> Platform.runLater(() -> {
+            if (incomingFileItem != null) chatItems.remove(incomingFileItem); // прежний приём прерван новым
             incomingFileItem = ChatItem.fileReceived(name, size);
             chatItems.add(incomingFileItem);
             scrollToBottom();

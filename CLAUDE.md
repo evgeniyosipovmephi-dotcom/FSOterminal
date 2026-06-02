@@ -36,19 +36,21 @@
 ### Типы кадров (BulkProtocol, 0x30–0x39)
 | Код | Имя | payload |
 |---|---|---|
-| 0x30 | FILE_BEGIN | `[kind 1][blocks 2][size 4][nameLen 1][name…]` |
-| 0x32 | DATA | `[blk 1][idx 2][data ≤56]` — кадр ровно 64 Б |
-| 0x33 | BLOCK_END | `[blk 1][count 2]` |
-| 0x34 | NACK | `[blk 1][count 2][bitmap: бит=0 → потерян]` |
-| 0x35 | BLOCK_DONE | `[blk 1]` |
-| 0x36 | FILE_END | `[]` |
+| 0x30 | FILE_BEGIN | `[tid 1][kind 1][blocks 2][size 4][nameLen 1][name…]` |
+| 0x32 | DATA | `[tid 1][blk 1][idx 2][data ≤55]` — кадр ровно 64 Б |
+| 0x33 | BLOCK_END | `[tid 1][blk 1][count 2]` |
+| 0x34 | NACK | `[tid 1][blk 1][count 2][bitmap: бит=0 → потерян]` |
+| 0x35 | BLOCK_DONE | `[tid 1][blk 1]` |
+| 0x36 | FILE_END | `[tid 1]` |
 | 0x38 | MSG | `[msg_id 1][flag 1][текст ≤57]` (flag 0xFF=ещё / 0x00=последний) |
 | 0x39 | MSG_ACK | `[msg_id 1]` |
 
-`kind`: 0=файл, 1=голос, 2=фото. PROBE/PROBE_RESP (0x03/0x04) живут в `FrameCodec`.
+`kind`: 0=файл, 1=голос, 2=фото. `tid` (transfer-id, rolling) — id передачи: приёмник
+сбрасывает недопринятый файл при новом tid и игнорирует кадры с чужим tid (защита от
+смешивания отменённой и новой передачи). PROBE/PROBE_RESP (0x03/0x04) — в `FrameCodec`.
 
 ### Ключевая идея: кадр 64 байта + over-drive
-DATA-кадр = ровно **64 Б** (data 56 + 7 служебных) = один USB-кусок. Это единственный
+DATA-кадр = ровно **64 Б** (data 55 + 9 служебных, включая tid) = один USB-кусок. Это единственный
 размер, который можно **передавливать** (слать быстрее физического пола FSO): входной
 буфер STM (512 Б) держит 8 таких кадров и сглаживает перегруз, редкие потери чистятся
 дешёвыми ретрансмитами. Пейсинг: `delay = пол − overdrive`; для 64 Б пол = 31 мс,

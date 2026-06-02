@@ -5,11 +5,14 @@ import java.util.function.DoubleConsumer;
 
 /**
  * Приёмник файла блочным ARQ. См. docs/BULK_PROTOCOL_DESIGN.md.
- * Чистая Java, без JavaFX. Не потокобезопасен — feed() вызывать из одного потока
- * (потока-слушателя канала).
+ * Чистая Java, без JavaFX. Не потокобезопасен — feed() вызывать из одного потока.
  *
- * Управляющие кадры (NACK/BLOCK_DONE) отправляются через переданный
- * {@link PacedTransmitter} с высоким приоритетом (sendNow).
+ * tid (transfer-id) защищает от смешивания передач: новый tid в FILE_BEGIN сбрасывает
+ * недопринятый файл и начинает свежий; кадры с чужим tid игнорируются (хвосты отменённой
+ * передачи безвредны).
+ *
+ * Управляющие кадры (NACK/BLOCK_DONE) отправляются через PacedTransmitter с высоким
+ * приоритетом (sendNow).
  */
 public class BulkReceiver {
 
@@ -27,6 +30,7 @@ public class BulkReceiver {
     private BeginHandler           onBegin;      // опционально, через setOnBegin
 
     private boolean   active = false;
+    private int       curTid = -1;
     private int       fileKind;
     private String    fileName;
     private int       fileSize;
@@ -51,22 +55,25 @@ public class BulkReceiver {
             case BulkProtocol.TYPE_FILE_BEGIN -> onFileBegin(fr.payload);
             case BulkProtocol.TYPE_DATA       -> onData(fr.payload);
             case BulkProtocol.TYPE_BLOCK_END  -> onBlockEnd(fr.payload);
-            case BulkProtocol.TYPE_FILE_END   -> onFileEnd();
+            case BulkProtocol.TYPE_FILE_END   -> onFileEnd(fr.payload);
             default -> { /* не наш кадр */ }
         }
     }
 
     private void onFileBegin(byte[] p) {
-        if (p.length < 8) return;
-        if (active) return;                          // дубликат FILE_BEGIN — игнор
-        int kind   = p[0] & 0xFF;
-        int blocks = (p[1] & 0xFF) | ((p[2] & 0xFF) << 8);
-        int size   = (p[3] & 0xFF) | ((p[4] & 0xFF) << 8)
-                   | ((p[5] & 0xFF) << 16) | ((p[6] & 0xFF) << 24);
-        int nmLen  = p[7] & 0xFF;
-        if (size < 0 || nmLen > p.length - 8) return;
+        if (p.length < 9) return;
+        int tid = p[0] & 0xFF;
+        if (active && tid == curTid) return;         // дубликат FILE_BEGIN той же передачи
+        // Новый tid (или мы не были активны) → начинаем свежий приём, прежний бросаем.
+        int kind   = p[1] & 0xFF;
+        int blocks = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
+        int size   = (p[4] & 0xFF) | ((p[5] & 0xFF) << 8)
+                   | ((p[6] & 0xFF) << 16) | ((p[7] & 0xFF) << 24);
+        int nmLen  = p[8] & 0xFF;
+        if (size < 0 || nmLen > p.length - 9) return;
+        curTid      = tid;
         fileKind    = kind;
-        fileName    = new String(p, 8, Math.min(nmLen, p.length - 8), StandardCharsets.UTF_8);
+        fileName    = new String(p, 9, Math.min(nmLen, p.length - 9), StandardCharsets.UTF_8);
         fileSize    = size;
         numBlocks   = Math.max(1, blocks);
         totalFrames = (int) Math.ceil((double) size / BulkProtocol.DATA_BYTES);
@@ -78,9 +85,9 @@ public class BulkReceiver {
     }
 
     private void onData(byte[] p) {
-        if (!active || p.length < 3) return;
-        int blk = p[0] & 0xFF;
-        int idx = (p[1] & 0xFF) | ((p[2] & 0xFF) << 8);
+        if (!active || p.length < 4 || (p[0] & 0xFF) != curTid) return;
+        int blk = p[1] & 0xFF;
+        int idx = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
         maybeAdvance(blk);
         if (blk != (curBlock & 0xFF)) return;        // кадр чужого блока
         int abs = curBlock * BulkProtocol.BLOCK_FRAMES + idx;
@@ -88,13 +95,13 @@ public class BulkReceiver {
         gotIt[abs] = true;
         int off = abs * BulkProtocol.DATA_BYTES;
         int len = Math.min(BulkProtocol.DATA_BYTES, fileSize - off);
-        System.arraycopy(p, 3, fileBuf, off, Math.min(len, p.length - 3));
+        System.arraycopy(p, 4, fileBuf, off, Math.min(len, p.length - 4));
     }
 
     private void onBlockEnd(byte[] p) {
-        if (!active || p.length < 3) return;
-        int blk   = p[0] & 0xFF;
-        int count = (p[1] & 0xFF) | ((p[2] & 0xFF) << 8);
+        if (!active || p.length < 4 || (p[0] & 0xFF) != curTid) return;
+        int blk   = p[1] & 0xFF;
+        int count = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
         maybeAdvance(blk);
         if (blk != (curBlock & 0xFF)) return;        // END чужого блока
         int base  = curBlock * BulkProtocol.BLOCK_FRAMES;
@@ -106,20 +113,22 @@ public class BulkReceiver {
             else missing++;
         }
         if (missing == 0) {
-            tx.sendNow(FrameCodec.encode(0, BulkProtocol.TYPE_BLOCK_DONE, new byte[]{ (byte) blk }));
+            tx.sendNow(FrameCodec.encode(0, BulkProtocol.TYPE_BLOCK_DONE,
+                new byte[]{ (byte) curTid, (byte) blk }));
             if (progress != null) progress.accept(Math.min(1.0, (double)(curBlock + 1) / numBlocks));
         } else {
-            byte[] resp = new byte[3 + bmLen];
-            resp[0] = (byte) blk;
-            resp[1] = (byte)(count & 0xFF);
-            resp[2] = (byte)((count >> 8) & 0xFF);
-            System.arraycopy(bm, 0, resp, 3, bmLen);
+            byte[] resp = new byte[4 + bmLen];
+            resp[0] = (byte) curTid;
+            resp[1] = (byte) blk;
+            resp[2] = (byte)(count & 0xFF);
+            resp[3] = (byte)((count >> 8) & 0xFF);
+            System.arraycopy(bm, 0, resp, 4, bmLen);
             tx.sendNow(FrameCodec.encode(0, BulkProtocol.TYPE_NACK, resp));
         }
     }
 
-    private void onFileEnd() {
-        if (!active) return;
+    private void onFileEnd(byte[] p) {
+        if (!active || p.length < 1 || (p[0] & 0xFF) != curTid) return;
         active = false;
         if (onComplete != null) onComplete.onFile(fileKind, fileName, fileBuf);
     }

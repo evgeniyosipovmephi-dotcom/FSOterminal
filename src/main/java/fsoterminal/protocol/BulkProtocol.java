@@ -17,13 +17,14 @@ public final class BulkProtocol {
     public static final int KIND_IMAGE = 2; // изображение (превью в чате)
 
     // ── Типы кадров (диапазон 0x30–0x39) ───────────────────────────────────────
-    public static final int TYPE_FILE_BEGIN  = 0x30; // [kind 1][blocks 2][size 4][nameLen 1][name…]
-    public static final int TYPE_BLOCK_BEGIN = 0x31; // [blk 1][count 2]
-    public static final int TYPE_DATA        = 0x32; // [blk 1][idx 2][data ≤56]
-    public static final int TYPE_BLOCK_END   = 0x33; // [blk 1][count 2]
-    public static final int TYPE_NACK        = 0x34; // [blk 1][count 2][bitmap: бит=0 → потерян]
-    public static final int TYPE_BLOCK_DONE  = 0x35; // [blk 1]
-    public static final int TYPE_FILE_END    = 0x36; // []
+    // tid (1 Б, rolling) — id передачи: защищает от смешивания отменённого и нового файла.
+    public static final int TYPE_FILE_BEGIN  = 0x30; // [tid 1][kind 1][blocks 2][size 4][nameLen 1][name…]
+    public static final int TYPE_BLOCK_BEGIN = 0x31; // (не используется)
+    public static final int TYPE_DATA        = 0x32; // [tid 1][blk 1][idx 2][data ≤55]
+    public static final int TYPE_BLOCK_END   = 0x33; // [tid 1][blk 1][count 2]
+    public static final int TYPE_NACK        = 0x34; // [tid 1][blk 1][count 2][bitmap: бит=0 → потерян]
+    public static final int TYPE_BLOCK_DONE  = 0x35; // [tid 1][blk 1]
+    public static final int TYPE_FILE_END    = 0x36; // [tid 1]
     public static final int TYPE_MSG         = 0x38; // [msg_id 1][flag 1][текст ≤57]
     public static final int TYPE_MSG_ACK     = 0x39; // [msg_id 1]
 
@@ -33,14 +34,14 @@ public final class BulkProtocol {
 
     // ── Размеры ────────────────────────────────────────────────────────────────
     public static final int FSO_BAUD     = 24_000; // бод (8N1 → 2400 байт/с)
-    public static final int DATA_BYTES   = 56;     // данных в DATA-кадре → кадр 64 Б
+    public static final int DATA_BYTES   = 55;     // данных в DATA-кадре → кадр 64 Б (с tid)
     public static final int BLOCK_FRAMES = 400;    // кадров в блоке (NACK = 1 USB-кусок)
     public static final int MSG_BYTES    = 57;     // текста в одном MSG-кадре
 
     /** Длина DATA-кадра на проводе для dataLen байт данных. */
     public static int dataFrameLen(int dataLen) {
-        // HEADER(4) + [blk 1 + idx 2 + data] + CRC(1)
-        return FrameCodec.HEADER + 1 + 2 + dataLen + FrameCodec.TRAILER;
+        // HEADER(4) + [tid 1 + blk 1 + idx 2 + data] + CRC(1)
+        return FrameCodec.HEADER + 1 + 1 + 2 + dataLen + FrameCodec.TRAILER;
     }
 
     /**
