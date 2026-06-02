@@ -1,7 +1,6 @@
 package fsoterminal.protocol;
 
 import java.nio.charset.StandardCharsets;
-import java.util.function.BiConsumer;
 import java.util.function.DoubleConsumer;
 
 /**
@@ -14,11 +13,16 @@ import java.util.function.DoubleConsumer;
  */
 public class BulkReceiver {
 
+    /** Колбэк завершённого приёма: kind (KIND_*), имя, содержимое. */
+    @FunctionalInterface
+    public interface FileHandler { void onFile(int kind, String name, byte[] data); }
+
     private final PacedTransmitter tx;
-    private final BiConsumer<String, byte[]> onComplete; // имя, содержимое
-    private final DoubleConsumer progress;               // доля 0..1, может быть null
+    private final FileHandler      onComplete;
+    private final DoubleConsumer   progress;     // доля 0..1, может быть null
 
     private boolean   active = false;
+    private int       fileKind;
     private String    fileName;
     private int       fileSize;
     private int       totalFrames;
@@ -27,8 +31,7 @@ public class BulkReceiver {
     private boolean[] gotIt;
     private int       curBlock;   // абсолютный номер текущего блока
 
-    public BulkReceiver(PacedTransmitter tx,
-                        BiConsumer<String, byte[]> onComplete, DoubleConsumer progress) {
+    public BulkReceiver(PacedTransmitter tx, FileHandler onComplete, DoubleConsumer progress) {
         this.tx         = tx;
         this.onComplete = onComplete;
         this.progress   = progress;
@@ -46,14 +49,16 @@ public class BulkReceiver {
     }
 
     private void onFileBegin(byte[] p) {
-        if (p.length < 7) return;
+        if (p.length < 8) return;
         if (active) return;                          // дубликат FILE_BEGIN — игнор
-        int blocks = (p[0] & 0xFF) | ((p[1] & 0xFF) << 8);
-        int size   = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8)
-                   | ((p[4] & 0xFF) << 16) | ((p[5] & 0xFF) << 24);
-        int nmLen  = p[6] & 0xFF;
-        if (size < 0 || nmLen > p.length - 7) return;
-        fileName    = new String(p, 7, Math.min(nmLen, p.length - 7), StandardCharsets.UTF_8);
+        int kind   = p[0] & 0xFF;
+        int blocks = (p[1] & 0xFF) | ((p[2] & 0xFF) << 8);
+        int size   = (p[3] & 0xFF) | ((p[4] & 0xFF) << 8)
+                   | ((p[5] & 0xFF) << 16) | ((p[6] & 0xFF) << 24);
+        int nmLen  = p[7] & 0xFF;
+        if (size < 0 || nmLen > p.length - 8) return;
+        fileKind    = kind;
+        fileName    = new String(p, 8, Math.min(nmLen, p.length - 8), StandardCharsets.UTF_8);
         fileSize    = size;
         numBlocks   = Math.max(1, blocks);
         totalFrames = (int) Math.ceil((double) size / BulkProtocol.DATA_BYTES);
@@ -107,7 +112,7 @@ public class BulkReceiver {
     private void onFileEnd() {
         if (!active) return;
         active = false;
-        if (onComplete != null) onComplete.accept(fileName, fileBuf);
+        if (onComplete != null) onComplete.onFile(fileKind, fileName, fileBuf);
     }
 
     /** Если пришёл кадр следующего блока — отправитель завершил текущий, продвигаемся. */

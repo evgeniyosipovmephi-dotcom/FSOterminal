@@ -11,8 +11,13 @@ public final class BulkProtocol {
 
     private BulkProtocol() {}
 
+    // ── Вид содержимого (байт kind в FILE_BEGIN) ───────────────────────────────
+    public static final int KIND_FILE  = 0; // обычный файл
+    public static final int KIND_VOICE = 1; // голосовое сообщение
+    public static final int KIND_IMAGE = 2; // изображение (превью в чате)
+
     // ── Типы кадров (диапазон 0x30–0x39) ───────────────────────────────────────
-    public static final int TYPE_FILE_BEGIN  = 0x30; // [blocks 2][size 4][nameLen 1][name…]
+    public static final int TYPE_FILE_BEGIN  = 0x30; // [kind 1][blocks 2][size 4][nameLen 1][name…]
     public static final int TYPE_BLOCK_BEGIN = 0x31; // [blk 1][count 2]
     public static final int TYPE_DATA        = 0x32; // [blk 1][idx 2][data ≤56]
     public static final int TYPE_BLOCK_END   = 0x33; // [blk 1][count 2]

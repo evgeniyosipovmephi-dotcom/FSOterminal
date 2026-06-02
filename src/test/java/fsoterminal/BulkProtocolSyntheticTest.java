@@ -65,7 +65,7 @@ class BulkProtocolSyntheticTest {
             }
         });
 
-        rxBox[0] = new BulkReceiver(txB, (name, bytes) -> {
+        rxBox[0] = new BulkReceiver(txB, (kind, name, bytes) -> {
             rxName.set(name);
             received.set(bytes);
             done.countDown();
@@ -75,7 +75,7 @@ class BulkProtocolSyntheticTest {
         txA.start();
         txB.start();
 
-        sxBox[0].send("test.bin", data, null, () -> {}, err -> fail("Ошибка отправки: " + err));
+        sxBox[0].send(BulkProtocol.KIND_FILE, "test.bin", data, null, () -> {}, err -> fail("Ошибка отправки: " + err));
 
         assertTrue(done.await(60, TimeUnit.SECONDS), "Передача не завершилась за 60 с");
         txA.stop();

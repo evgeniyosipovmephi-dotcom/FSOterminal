@@ -44,13 +44,13 @@ public class BulkSender {
      * @param onComplete вызывается при успешном завершении, может быть null
      * @param onError    вызывается с текстом ошибки при обрыве, может быть null
      */
-    public void send(String name, byte[] data,
+    public void send(int kind, String name, byte[] data,
                      DoubleConsumer progress, Runnable onComplete, Consumer<String> onError) {
         cancelled = false;
         inbox.clear();
         Thread t = new Thread(() -> {
             try {
-                runTransfer(name, data, progress);
+                runTransfer(kind, name, data, progress);
                 if (!cancelled && onComplete != null) onComplete.run();
             } catch (TransferException te) {
                 if (onError != null) onError.accept(te.getMessage());
@@ -64,7 +64,7 @@ public class BulkSender {
 
     // -------------------------------------------------------------------------
 
-    private void runTransfer(String name, byte[] data, DoubleConsumer progress)
+    private void runTransfer(int kind, String name, byte[] data, DoubleConsumer progress)
             throws InterruptedException, TransferException {
         int totalFrames = (int) Math.ceil((double) data.length / BulkProtocol.DATA_BYTES);
         int numBlocks   = Math.max(1, (int) Math.ceil((double) totalFrames / BulkProtocol.BLOCK_FRAMES));
@@ -74,7 +74,7 @@ public class BulkSender {
         tx.setDataDelayMs(delay);
 
         // FILE_BEGIN ×3 (идемпотентно, дублёр на случай потери первого)
-        byte[] begin = encodeFileBegin(name, data.length, numBlocks);
+        byte[] begin = encodeFileBegin(kind, name, data.length, numBlocks);
         for (int i = 0; i < 3; i++) tx.sendPaced(begin);
 
         for (int b = 0; b < numBlocks; b++) {
@@ -128,15 +128,16 @@ public class BulkSender {
         return FrameCodec.encode(seq++, BulkProtocol.TYPE_BLOCK_END, p);
     }
 
-    private byte[] encodeFileBegin(String name, int size, int blocks) {
+    private byte[] encodeFileBegin(int kind, String name, int size, int blocks) {
         byte[] nm = name.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         if (nm.length > 200) nm = java.util.Arrays.copyOf(nm, 200);
-        byte[] p = new byte[2 + 4 + 1 + nm.length];
-        p[0] = (byte)(blocks & 0xFF);   p[1] = (byte)((blocks >> 8) & 0xFF);
-        p[2] = (byte)(size & 0xFF);     p[3] = (byte)((size >> 8) & 0xFF);
-        p[4] = (byte)((size >> 16) & 0xFF); p[5] = (byte)((size >> 24) & 0xFF);
-        p[6] = (byte) nm.length;
-        System.arraycopy(nm, 0, p, 7, nm.length);
+        byte[] p = new byte[1 + 2 + 4 + 1 + nm.length];
+        p[0] = (byte) kind;
+        p[1] = (byte)(blocks & 0xFF);       p[2] = (byte)((blocks >> 8) & 0xFF);
+        p[3] = (byte)(size & 0xFF);         p[4] = (byte)((size >> 8) & 0xFF);
+        p[5] = (byte)((size >> 16) & 0xFF); p[6] = (byte)((size >> 24) & 0xFF);
+        p[7] = (byte) nm.length;
+        System.arraycopy(nm, 0, p, 8, nm.length);
         return FrameCodec.encode(seq++, BulkProtocol.TYPE_FILE_BEGIN, p);
     }
 
