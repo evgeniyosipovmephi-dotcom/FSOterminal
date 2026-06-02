@@ -17,9 +17,14 @@ public class BulkReceiver {
     @FunctionalInterface
     public interface FileHandler { void onFile(int kind, String name, byte[] data); }
 
+    /** Колбэк начала приёма (создать пузырь прогресса): kind, имя, размер. */
+    @FunctionalInterface
+    public interface BeginHandler { void onBegin(int kind, String name, int size); }
+
     private final PacedTransmitter tx;
     private final FileHandler      onComplete;
     private final DoubleConsumer   progress;     // доля 0..1, может быть null
+    private BeginHandler           onBegin;      // опционально, через setOnBegin
 
     private boolean   active = false;
     private int       fileKind;
@@ -36,6 +41,9 @@ public class BulkReceiver {
         this.onComplete = onComplete;
         this.progress   = progress;
     }
+
+    /** Установить колбэк начала приёма (создание пузыря). */
+    public void setOnBegin(BeginHandler h) { this.onBegin = h; }
 
     /** Скормить декодированный кадр. Чужие типы молча игнорируются. */
     public void feed(FrameCodec.Frame fr) {
@@ -66,6 +74,7 @@ public class BulkReceiver {
         gotIt       = new boolean[Math.max(1, totalFrames)];
         curBlock    = 0;
         active      = true;
+        if (onBegin != null) onBegin.onBegin(fileKind, fileName, fileSize);
     }
 
     private void onData(byte[] p) {

@@ -27,12 +27,8 @@ import java.io.File;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
 import java.util.Optional;
 import java.util.ResourceBundle;
-import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.prefs.Preferences;
@@ -54,24 +50,20 @@ public class MainWindowSC implements Initializable {
 
     private final ObservableList<ChatItem> chatItems = FXCollections.observableArrayList();
 
-    // Протокол
+    // Протокол (bulk + MSG)
     private SerialChannel            channel;
-    private SlidingWindowSender      sender;
-    private SlidingWindowReceiver    receiver;
-    private AckProcessor             ackProc;
-    private TextAssembler            assembler;
-    private FileAssembler            fileAssembler;
+    private PacedTransmitter         tx;
+    private BulkSender               bulkSender;
+    private BulkReceiver             bulkReceiver;
+    private MsgChannel               msgChannel;
+    private FrameCodec.Decoder       rxDecoder;
     private ScheduledExecutorService protocolTimer;
 
-    /** ChatItem входящего файла/изображения (для обновления прогресса). */
+    /** ChatItem входящего файла/изображения/голоса (для обновления прогресса). */
     private ChatItem incomingFileItem;
 
-    /**
-     * Активные потоки отправки файлов/текстов.
-     * При disconnect() все прерываются, чтобы не зависать на trySend().
-     */
-    private final Set<Thread> activeSendThreads =
-        Collections.newSetFromMap(new ConcurrentHashMap<>());
+    /** Одна исходящая bulk-передача за раз. */
+    private final AtomicBoolean sendingFile = new AtomicBoolean(false);
 
     // Голос
     private final AudioRecorder            audioRecorder = new AudioRecorder();
@@ -82,17 +74,15 @@ public class MainWindowSC implements Initializable {
     private ScheduledFuture<?> voiceCounterFuture;
 
     // PROBE и RTT
-    private static final int PROBE_INTERVAL_SEC = 5;
-    private static final int PROBE_MAX_MISS      = 3;
     private volatile long lastReceivedMs = 0;
     private volatile long probeSentMs    = 0;
 
     // Настройки
     private static final Preferences PREFS              = Preferences.userNodeForPackage(MainWindowSC.class);
     private static final String      PREF_PORT          = "lastPort";
-    private static final String      PREF_WINDOW_SIZE   = "windowSize";
-    private static final String      PREF_RETRANSMIT_MS = "retransmitMs";
+    private static final String      PREF_OVERDRIVE     = "bulkOverdriveMs";
     private static final String      PREF_PROBE_SEC     = "probeIntervalSec";
+    private static final String      PREF_PROBE_MISS    = "probeMaxMiss";
     private static final String      PREF_DOWNLOAD_PATH = "downloadPath";
 
     private final ProtocolConfig config = new ProtocolConfig();
@@ -167,162 +157,126 @@ public class MainWindowSC implements Initializable {
         String portItem = portCombo.getValue();
         if (portItem == null || portItem.isBlank()) { addSystem("Выберите COM-порт"); return; }
 
-        assembler = new TextAssembler(text -> Platform.runLater(() -> {
+        channel   = new SerialChannel();
+        tx        = new PacedTransmitter(channel::send);
+        long delay = BulkProtocol.pacingMs(
+            BulkProtocol.dataFrameLen(BulkProtocol.DATA_BYTES), config.bulkOverdriveMs);
+        tx.setDataDelayMs(delay);
+        rxDecoder = new FrameCodec.Decoder();
+
+        bulkSender = new BulkSender(tx, config);
+
+        msgChannel = new MsgChannel(tx, text -> Platform.runLater(() -> {
             chatItems.add(ChatItem.received(text));
             scrollToBottom();
         }));
 
-        fileAssembler = new FileAssembler(
-            (name, totalBytes) -> Platform.runLater(() -> {
-                incomingFileItem = ChatItem.fileReceived(name, totalBytes);
-                chatItems.add(incomingFileItem);
-                scrollToBottom();
-            }),
-            (received, total) -> {
-                if (total <= 0) return;
-                double p = (double) received / total;
-                ChatItem item = incomingFileItem;
-                if (item != null) Platform.runLater(() -> item.setProgress(p));
-            },
-            (name, data) -> Platform.runLater(() -> {
+        bulkReceiver = new BulkReceiver(tx,
+            (kind, name, data) -> Platform.runLater(() -> {
                 ChatItem item = incomingFileItem;
                 incomingFileItem = null;
                 saveReceivedFile(name, data, item);
-            })
-        );
-        // Когда отправитель явно отменил передачу — убрать пузырь и показать сообщение
-        fileAssembler.setOnCancel(() -> Platform.runLater(() -> {
-            ChatItem item = incomingFileItem;
-            incomingFileItem = null;
-            if (item != null) chatItems.remove(item);
-            addSystem("Передача файла отменена отправителем");
+            }),
+            p -> { ChatItem it = incomingFileItem; if (it != null) Platform.runLater(() -> it.setProgress(p)); });
+        bulkReceiver.setOnBegin((kind, name, size) -> Platform.runLater(() -> {
+            incomingFileItem = ChatItem.fileReceived(name, size);
+            chatItems.add(incomingFileItem);
+            scrollToBottom();
         }));
 
-        int ws = config.windowSize;
-        channel  = new SerialChannel();
-        sender   = new SlidingWindowSender(ws, channel::send);
-        ackProc  = new AckProcessor(sender);
-        receiver = new SlidingWindowReceiver(ws, channel::send, this::dispatchFrame);
-        ackProc.setDataHandler(receiver::onFrame);
-
-        ackProc.setProbeHandler(() -> {
-            byte[] resp = FrameCodec.encode(0, FrameCodec.TYPE_PROBE_RESP, new byte[0]);
-            SerialChannel ch = channel;
-            if (ch != null) ch.send(resp);
-        });
-        ackProc.setProbeRespHandler(f -> {
-            long rtt = System.currentTimeMillis() - probeSentMs;
-            if (rtt > 0 && rtt < 60_000) {
-                String rttText = "RTT: " + rtt + " мс";
-                Platform.runLater(() -> lblRtt.setText(rttText));
-            }
-        });
-
-        channel.setReceiveHandler(data -> {
-            lastReceivedMs = System.currentTimeMillis();
-            ackProc.feed(data);
-        });
+        channel.setReceiveHandler(this::onBytes);
 
         if (channel.open(portItem, 115200)) {
+            tx.start();
             saveLastPort(portItem);
             lastReceivedMs = System.currentTimeMillis();
             startProtocolTimer();
             updateUiState(true);
-            addSystem("Подключено к " + portItem +
-                      " (окно: " + ws + " кадров)");
+            addSystem("Подключено к " + portItem + " (задержка кадра " + delay + " мс)");
         } else {
-            channel = null;
+            if (tx != null) tx.stop();
+            channel = null; tx = null; bulkSender = null; bulkReceiver = null; msgChannel = null;
             addSystem("Не удалось открыть порт");
         }
     }
 
-    /** Диспетчер упорядоченных кадров от SlidingWindowReceiver. */
-    private void dispatchFrame(FrameCodec.Frame frame) {
-        switch (frame.type) {
-            case FrameCodec.TYPE_DATA                          -> assembler.onFrame(frame);
-            case FrameCodec.TYPE_FILE_BEGIN,
-                 FrameCodec.TYPE_FILE_DATA,
-                 FrameCodec.TYPE_FILE_END,
-                 FrameCodec.TYPE_FILE_CANCEL                  -> fileAssembler.onFrame(frame);
-            case FrameCodec.TYPE_VOICE                        -> fileAssembler.onFrame(frame);
+    /** Слушатель байтов канала: декодирование и маршрутизация кадров по TYPE. */
+    private void onBytes(byte[] data) {
+        lastReceivedMs = System.currentTimeMillis();
+        rxDecoder.feed(data);
+        FrameCodec.Frame f;
+        while ((f = rxDecoder.poll()) != null) route(f);
+    }
+
+    private void route(FrameCodec.Frame f) {
+        switch (f.type) {
+            case BulkProtocol.TYPE_MSG, BulkProtocol.TYPE_MSG_ACK -> {
+                if (msgChannel != null) msgChannel.feed(f);
+            }
+            case BulkProtocol.TYPE_FILE_BEGIN, BulkProtocol.TYPE_DATA,
+                 BulkProtocol.TYPE_BLOCK_END, BulkProtocol.TYPE_FILE_END -> {
+                if (bulkReceiver != null) bulkReceiver.feed(f);
+            }
+            case BulkProtocol.TYPE_NACK, BulkProtocol.TYPE_BLOCK_DONE -> {
+                if (bulkSender != null) bulkSender.onControlFrame(f);
+            }
+            case FrameCodec.TYPE_PROBE -> {
+                SerialChannel ch = channel;
+                if (ch != null) ch.send(FrameCodec.encode(0, FrameCodec.TYPE_PROBE_RESP, new byte[0]));
+            }
+            case FrameCodec.TYPE_PROBE_RESP -> {
+                long rtt = System.currentTimeMillis() - probeSentMs;
+                if (rtt > 0 && rtt < 60_000) {
+                    String rttText = "RTT: " + rtt + " мс";
+                    Platform.runLater(() -> lblRtt.setText(rttText));
+                }
+            }
+            default -> { /* неизвестный тип */ }
         }
     }
 
     private void disconnect() {
         if (audioRecorder.isRecording()) stopRecording();
 
-        // Немедленно прерываем все потоки отправки:
-        // trySend() бросит InterruptedException и разблокирует зависший поток.
-        for (Thread t : activeSendThreads) t.interrupt();
-        activeSendThreads.clear();
-
+        if (bulkSender != null) bulkSender.cancel();
         stopProtocolTimer();
-        if (assembler     != null) assembler.reset();
-        if (fileAssembler != null) fileAssembler.reset();
-        if (channel       != null) channel.close();
-        channel = null; sender = null; receiver = null;
-        ackProc = null; assembler = null; fileAssembler = null;
-        // Если обрыв произошёл во время приёма файла — убрать незавершённый пузырь
+        if (tx      != null) tx.stop();
+        if (channel != null) channel.close();
+        channel = null; tx = null; bulkSender = null; bulkReceiver = null;
+        msgChannel = null; rxDecoder = null;
+        sendingFile.set(false);
+
         if (incomingFileItem != null) {
             chatItems.remove(incomingFileItem);
             incomingFileItem = null;
             addSystem("Передача файла прервана (разрыв соединения)");
-        } else {
-            incomingFileItem = null;
         }
         updateUiState(false);
     }
 
     // =========================================================================
-    // Отправка текста
+    // Отправка текста (MSG-дорожка)
     // =========================================================================
 
     private void sendText() {
-        if (sender == null || channel == null || !channel.isOpen()) return;
+        if (msgChannel == null || channel == null || !channel.isOpen()) return;
         String text = txtMessage.getText().trim();
         if (text.isEmpty()) return;
         txtMessage.clear();
 
-        byte[][] payloads = TextAssembler.encodePayloads(text);
-        int totalFrames = payloads.length;
-
-        ChatItem item = (totalFrames > 1) ? ChatItem.sentMultiFrame(text) : ChatItem.sent(text);
-        chatItems.add(item);
+        chatItems.add(ChatItem.sent(text));
         scrollToBottom();
 
-        SlidingWindowSender s = sender;
-        Thread t = new Thread(() -> {
-            activeSendThreads.add(Thread.currentThread());
-            try {
-                for (int i = 0; i < payloads.length; i++) {
-                    if (!s.trySend(FrameCodec.TYPE_DATA, payloads[i], 5000)) {
-                        Platform.runLater(() -> addSystem("Ошибка: канал занят"));
-                        return;
-                    }
-                    if (totalFrames > 1) {
-                        double p = (double)(i + 1) / totalFrames;
-                        Platform.runLater(() -> item.setProgress(p));
-                    }
-                }
-                if (totalFrames > 1)
-                    Platform.runLater(() -> item.setProgress(1.0));
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-            } finally {
-                activeSendThreads.remove(Thread.currentThread());
-            }
-        }, "fso-send");
-        t.setDaemon(true);
-        t.start();
+        msgChannel.send(text, err -> addSystem("Сообщение не доставлено: " + err));
     }
 
     // =========================================================================
-    // Отправка файлов
+    // Отправка файлов / голоса / фото (bulk-дорожка)
     // =========================================================================
 
     @FXML
     private void onFileAttach() {
-        if (sender == null || channel == null || !channel.isOpen()) return;
+        if (bulkSender == null || channel == null || !channel.isOpen()) return;
         FileChooser chooser = new FileChooser();
         chooser.setTitle("Выберите файл для отправки");
         File file = chooser.showOpenDialog(chatList.getScene().getWindow());
@@ -330,131 +284,56 @@ public class MainWindowSC implements Initializable {
     }
 
     private void sendFile(File file) {
+        if (bulkSender == null || channel == null || !channel.isOpen()) return;
+        if (!sendingFile.compareAndSet(false, true)) {
+            addSystem("Дождитесь завершения текущей передачи файла");
+            return;
+        }
+
         byte[] data;
         try { data = Files.readAllBytes(file.toPath()); }
-        catch (Exception e) { addSystem("Ошибка чтения: " + e.getMessage()); return; }
+        catch (Exception e) { addSystem("Ошибка чтения: " + e.getMessage()); sendingFile.set(false); return; }
 
         String name = file.getName();
-
-        // Определяем тип и при необходимости сразу ставим savedPath (исправление #6 и превью)
+        int    kind;
         ChatItem item;
         if (ChatItem.isVoiceName(name)) {
-            item = ChatItem.voiceSent(name, data.length);
-            item.setSavedPath(file.getAbsolutePath()); // разрешить воспроизведение сразу
+            kind = BulkProtocol.KIND_VOICE; item = ChatItem.voiceSent(name, data.length);
         } else if (ChatItem.isImageName(name)) {
-            item = ChatItem.imageSent(name, data.length);
-            item.setSavedPath(file.getAbsolutePath()); // показать превью сразу
+            kind = BulkProtocol.KIND_IMAGE; item = ChatItem.imageSent(name, data.length);
         } else {
-            item = ChatItem.fileSent(name, data.length);
-            item.setSavedPath(file.getAbsolutePath()); // открывать оригинал по клику
+            kind = BulkProtocol.KIND_FILE;  item = ChatItem.fileSent(name, data.length);
         }
+        item.setSavedPath(file.getAbsolutePath()); // открыть оригинал / показать превью сразу
         chatItems.add(item);
         scrollToBottom();
 
-        // Поддержка отмены
-        AtomicBoolean cancelled  = new AtomicBoolean(false);
-        Thread[]      threadRef  = { null };
         item.setCancelAction(() -> {
-            cancelled.set(true);
-            Thread th = threadRef[0];
-            if (th != null) th.interrupt();
+            bulkSender.cancel();
+            tx.clearPaced();
+            sendingFile.set(false);
+            Platform.runLater(() -> { chatItems.remove(item); addSystem("Отправка отменена: " + name); });
         });
 
-        SlidingWindowSender s = sender;
-        Thread t = new Thread(() -> {
-            threadRef[0] = Thread.currentThread();
-            activeSendThreads.add(Thread.currentThread());
-            try {
-                if (cancelled.get()) return;
-
-                // Таймаут на каждый кадр: 30 сек — достаточно для восстановления
-                // канала после кратковременной помехи (FSO: атмосферные флуктуации).
-                final long frameTimeoutMs = 30_000;
-
-                if (!s.trySend(FrameCodec.TYPE_FILE_BEGIN, encodeFileBegin(name, data.length), frameTimeoutMs)) {
-                    Platform.runLater(() -> addSystem("Ошибка: канал недоступен (FILE_BEGIN)"));
-                    return;
-                }
-
-                int offset = 0;
-                while (offset < data.length) {
-                    if (cancelled.get()) {
-                        final String n = name;
-                        Platform.runLater(() -> {
-                            chatItems.remove(item);
-                            addSystem("Отправка отменена: " + n);
-                        });
-                        return;
-                    }
-                    int len      = Math.min(FrameCodec.MAX_PAYLOAD, data.length - offset);
-                    byte[] chunk = Arrays.copyOfRange(data, offset, offset + len);
-                    if (!s.trySend(FrameCodec.TYPE_FILE_DATA, chunk, frameTimeoutMs)) {
-                        Platform.runLater(() -> addSystem("Ошибка: канал недоступен (FILE_DATA)"));
-                        return;
-                    }
-                    offset += len;
-                    double p = (double) offset / data.length;
-                    Platform.runLater(() -> item.setProgress(p));
-                }
-
-                if (!s.trySend(FrameCodec.TYPE_FILE_END, new byte[0], frameTimeoutMs)) {
-                    Platform.runLater(() -> addSystem("Ошибка: канал недоступен (FILE_END)"));
-                    return;
-                }
-
-                item.setCancelAction(null); // завершено — отмена недоступна
-                Platform.runLater(() -> {
-                    item.setProgress(1.0);
-                    addSystem("Файл отправлен: " + name +
-                              " (" + ChatItem.formatSize(data.length) + ")");
-                });
-            } catch (InterruptedException ex) {
-                // Прерван кнопкой ✕ или disconnect()
-                final String n = name;
-                if (cancelled.get()) {
-                    // Уведомляем получателя (best-effort: ждём кредита до 2 с)
-                    try { s.trySend(FrameCodec.TYPE_FILE_CANCEL, new byte[0], 2000); }
-                    catch (InterruptedException ignored) {}
-                    Platform.runLater(() -> {
-                        chatItems.remove(item);
-                        addSystem("Отправка отменена: " + n);
-                    });
-                } else {
-                    // Разрыв соединения — оставляем пузырь в ленте
-                    Platform.runLater(() ->
-                        addSystem("Передача прервана (разрыв соединения): " + n));
-                }
-                Thread.currentThread().interrupt();
-            } finally {
-                activeSendThreads.remove(Thread.currentThread());
+        bulkSender.send(kind, name, data,
+            p   -> Platform.runLater(() -> item.setProgress(p)),
+            ()  -> Platform.runLater(() -> {
+                item.setProgress(1.0);
                 item.setCancelAction(null);
-            }
-        }, "fso-file-send");
-        t.setDaemon(true);
-        t.start();
-    }
-
-    /** FILE_BEGIN payload: [nameLen:1B][name UTF-8][totalSize:4B LE] */
-    private static byte[] encodeFileBegin(String name, long totalBytes) {
-        byte[] nb     = name.getBytes(StandardCharsets.UTF_8);
-        int    nameLen = Math.min(nb.length, 245);
-        byte[] p      = new byte[1 + nameLen + 4];
-        p[0] = (byte) nameLen;
-        System.arraycopy(nb, 0, p, 1, nameLen);
-        int sz    = (int) Math.min(totalBytes, 0xFFFFFFFFL);
-        p[1+nameLen] = (byte)(sz);
-        p[2+nameLen] = (byte)(sz >> 8);
-        p[3+nameLen] = (byte)(sz >> 16);
-        p[4+nameLen] = (byte)(sz >> 24);
-        return p;
+                sendingFile.set(false);
+                addSystem("Файл отправлен: " + name + " (" + ChatItem.formatSize(data.length) + ")");
+            }),
+            err -> Platform.runLater(() -> {
+                item.setCancelAction(null);
+                sendingFile.set(false);
+                addSystem("Передача прервана: " + name + " — " + err);
+            }));
     }
 
     /** Сохраняет принятый файл в папку загрузок, обновляет ChatItem. */
     private void saveReceivedFile(String name, byte[] data, ChatItem item) {
         try {
             Path downloads = getDownloadPath();
-
-            // Уникальное имя
             Path dest = downloads.resolve(name);
             if (Files.exists(dest)) {
                 int    dot  = name.lastIndexOf('.');
@@ -473,7 +352,6 @@ public class MainWindowSC implements Initializable {
             addSystem("Получен: " + finalDest.getFileName() +
                       " → " + downloads.toAbsolutePath() +
                       " (" + ChatItem.formatSize(data.length) + ")");
-
         } catch (Exception e) {
             addSystem("Ошибка сохранения файла: " + e.getMessage());
         }
@@ -530,10 +408,8 @@ public class MainWindowSC implements Initializable {
                 byte[] wav = audioRecorder.stop();
                 if (wav.length <= 44) return; // пустая запись
 
-                String name = "voice_" + System.currentTimeMillis() + ".wav";
                 java.nio.file.Path tmp = java.nio.file.Files.createTempFile("fso_voice_", ".wav");
                 java.nio.file.Files.write(tmp, wav);
-
                 Platform.runLater(() -> sendFile(tmp.toFile()));
             } catch (Exception e) {
                 Platform.runLater(() -> addSystem("Ошибка записи: " + e.getMessage()));
@@ -544,7 +420,7 @@ public class MainWindowSC implements Initializable {
     }
 
     // =========================================================================
-    // Таймеры протокола
+    // Таймер PROBE (живучесть соединения)
     // =========================================================================
 
     private void startProtocolTimer() {
@@ -552,21 +428,7 @@ public class MainWindowSC implements Initializable {
             Thread t = new Thread(r, "protocol-timer");
             t.setDaemon(true); return t;
         });
-
-        // Ретрансмиссия по таймауту — fallback для хвостовых потерянных кадров:
-        // onAck() перепосылает только кадры с пробелом (gap-based selective repeat);
-        // таймер срабатывает когда окно не продвигалось дольше retransmitInterval мс
-        // (ACK за хвостовой кадр так и не пришёл).
-        int rtMs = config.retransmitIntervalMs;
-        protocolTimer.scheduleAtFixedRate(() -> {
-            SlidingWindowSender s = sender;
-            if (s == null || s.inFlight() == 0) return;
-            long noAdvanceMs = System.currentTimeMillis() - s.getLastAckAdvanceMs();
-            if (noAdvanceMs >= rtMs) s.retransmitUnconfirmed();
-        }, rtMs, rtMs, TimeUnit.MILLISECONDS);
-
-        // Первый PROBE — через 2 секунды (чтобы RTT появился быстро),
-        // потом каждые probeIntervalSec секунд.
+        // Первый PROBE через 2 с (чтобы RTT появился быстро), далее каждые probeIntervalSec.
         protocolTimer.schedule(this::onProbeTimer, 2, TimeUnit.SECONDS);
         protocolTimer.scheduleAtFixedRate(this::onProbeTimer,
             config.probeIntervalSec, config.probeIntervalSec, TimeUnit.SECONDS);
@@ -606,20 +468,20 @@ public class MainWindowSC implements Initializable {
         grid.setVgap(10);
         grid.setPadding(new Insets(16, 20, 10, 10));
 
-        // Размер окна
-        Spinner<Integer> spWindow = new Spinner<>(1, 16, config.windowSize);
-        spWindow.setEditable(true);
-        spWindow.setPrefWidth(80);
-
-        // Интервал ретрансмиссии
-        Spinner<Integer> spRetransmit = new Spinner<>(100, 5000, config.retransmitIntervalMs, 100);
-        spRetransmit.setEditable(true);
-        spRetransmit.setPrefWidth(90);
+        // Over-drive (насколько слать быстрее физического пола FSO)
+        Spinner<Integer> spOver = new Spinner<>(0, 30, config.bulkOverdriveMs);
+        spOver.setEditable(true);
+        spOver.setPrefWidth(80);
 
         // Интервал PROBE
         Spinner<Integer> spProbe = new Spinner<>(1, 60, config.probeIntervalSec);
         spProbe.setEditable(true);
         spProbe.setPrefWidth(80);
+
+        // Таймаут (пропусков PROBE до разрыва)
+        Spinner<Integer> spMiss = new Spinner<>(1, 10, config.probeMaxMiss);
+        spMiss.setEditable(true);
+        spMiss.setPrefWidth(80);
 
         // Папка сохранения
         TextField tfDownload = new TextField(getDownloadPath().toString());
@@ -635,12 +497,11 @@ public class MainWindowSC implements Initializable {
         });
         HBox pathRow = new HBox(5, tfDownload, btnBrowse);
 
-        grid.addRow(0, new Label("Размер окна:"),         spWindow,     new Label("кадров (1–16)"));
-        grid.addRow(1, new Label("Ретрансмиссия:"),       spRetransmit, new Label("мс"));
-        grid.addRow(2, new Label("Интервал PROBE:"),      spProbe,      new Label("сек"));
-        grid.addRow(3, new Label("Папка сохранения:"),    pathRow);
+        grid.addRow(0, new Label("Over-drive:"),       spOver,  new Label("мс (быстрее пола; 0 = безопасно)"));
+        grid.addRow(1, new Label("Интервал PROBE:"),   spProbe, new Label("сек"));
+        grid.addRow(2, new Label("Таймаут разрыва:"),  spMiss,  new Label("× интервал PROBE"));
+        grid.addRow(3, new Label("Папка сохранения:"), pathRow);
 
-        // Подсказка о применении
         Label hint = new Label("⚠ Изменения вступают в силу при следующем подключении.");
         hint.setStyle("-fx-font-size: 10px; -fx-text-fill: #888888;");
         grid.add(hint, 0, 4, 3, 1);
@@ -649,9 +510,9 @@ public class MainWindowSC implements Initializable {
 
         Optional<ButtonType> result = dlg.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
-            try { config.windowSize = spWindow.getValue(); } catch (Exception ignored) {}
-            try { config.retransmitIntervalMs = spRetransmit.getValue(); } catch (Exception ignored) {}
-            try { config.probeIntervalSec     = spProbe.getValue();      } catch (Exception ignored) {}
+            try { config.bulkOverdriveMs = spOver.getValue();  } catch (Exception ignored) {}
+            try { config.probeIntervalSec = spProbe.getValue(); } catch (Exception ignored) {}
+            try { config.probeMaxMiss     = spMiss.getValue();  } catch (Exception ignored) {}
             String path = tfDownload.getText().trim();
             config.downloadPath = path.isEmpty() ? null : path;
             saveConfig();
@@ -683,14 +544,16 @@ public class MainWindowSC implements Initializable {
             "  " + savePath + "\n" +
             "  (изменить: меню Настройки → Параметры протокола)\n\n" +
             "ПРОТОКОЛ:\n" +
-            "  Sliding Window ARQ, окно " + config.windowSize + " кадров\n" +
-            "  Кадр: [SOF 0x7E][SEQ][TYPE][LEN][PAYLOAD≤250][CRC8]\n" +
-            "  Скорость канала: ~24 кбит/с, RTT ≈ 130 мс\n\n" +
+            "  Файлы/голос/фото — блочный bulk-ARQ, кадр 64 Б (data 56 Б)\n" +
+            "  Текст — отдельная дорожка MSG с фрагментацией\n" +
+            "  Пейсинг = пол FSO − over-drive (по умолч. 11 → задержка 20 мс)\n" +
+            "  Кадр: [SOF 0xAA][SEQ][TYPE][LEN][PAYLOAD][CRC8]\n" +
+            "  Скорость канала: ~24 кбит/с (≈2400 байт/с), пик ~1700 байт/с\n\n" +
             "СОВМЕСТИМОСТЬ:\n" +
             "  STM32F722 (прозрачный мост USB-CDC ↔ FSO) — изменений не требует";
 
         alert.setContentText(text);
-        alert.getDialogPane().setPrefWidth(520);
+        alert.getDialogPane().setPrefWidth(540);
         alert.showAndWait();
     }
 
@@ -699,17 +562,17 @@ public class MainWindowSC implements Initializable {
     // =========================================================================
 
     private void loadConfig() {
-        config.windowSize          = PREFS.getInt(PREF_WINDOW_SIZE,   8);
-        config.retransmitIntervalMs = PREFS.getInt(PREF_RETRANSMIT_MS, 400);
-        config.probeIntervalSec    = PREFS.getInt(PREF_PROBE_SEC,      5);
+        config.bulkOverdriveMs = PREFS.getInt(PREF_OVERDRIVE,  11);
+        config.probeIntervalSec = PREFS.getInt(PREF_PROBE_SEC,  5);
+        config.probeMaxMiss     = PREFS.getInt(PREF_PROBE_MISS, 3);
         String dp = PREFS.get(PREF_DOWNLOAD_PATH, "");
         config.downloadPath = (dp == null || dp.isBlank()) ? null : dp;
     }
 
     private void saveConfig() {
-        PREFS.putInt(PREF_WINDOW_SIZE,   config.windowSize);
-        PREFS.putInt(PREF_RETRANSMIT_MS, config.retransmitIntervalMs);
-        PREFS.putInt(PREF_PROBE_SEC,     config.probeIntervalSec);
+        PREFS.putInt(PREF_OVERDRIVE,  config.bulkOverdriveMs);
+        PREFS.putInt(PREF_PROBE_SEC,  config.probeIntervalSec);
+        PREFS.putInt(PREF_PROBE_MISS, config.probeMaxMiss);
         if (config.downloadPath != null && !config.downloadPath.isBlank())
             PREFS.put(PREF_DOWNLOAD_PATH, config.downloadPath);
         else
@@ -754,7 +617,8 @@ public class MainWindowSC implements Initializable {
 
     private void updateCharCount(String text) {
         if (text == null || text.isBlank()) { lblCharCount.setText(""); return; }
-        int frames = TextAssembler.frameCount(text);
+        int bytes  = text.getBytes(StandardCharsets.UTF_8).length;
+        int frames = Math.max(1, (int) Math.ceil((double) bytes / BulkProtocol.MSG_BYTES));
         lblCharCount.setText(frames > 1
             ? text.length() + " симв. / " + frames + " кадра"
             : text.length() + " симв.");

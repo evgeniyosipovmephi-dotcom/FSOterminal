@@ -43,8 +43,9 @@ class FrameCodecTest {
 
     @Test
     void encode_maxPayload_fits255() {
-        // MAX_PAYLOAD=250 + HEADER=4 + TRAILER=1 = 255 ровно
-        assertEquals(255, FrameCodec.MAX_FRAME);
+        // MAX_PAYLOAD=240 + HEADER=4 + TRAILER=1 = 245 ≤ 255 (лимит пакета STM32)
+        assertEquals(245, FrameCodec.MAX_FRAME);
+        assertTrue(FrameCodec.MAX_FRAME <= 255, "кадр должен влезать в лимит STM32 (255 Б)");
     }
 
     @Test

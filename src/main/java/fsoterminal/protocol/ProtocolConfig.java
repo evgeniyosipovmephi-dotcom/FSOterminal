@@ -7,12 +7,6 @@ package fsoterminal.protocol;
  */
 public class ProtocolConfig {
 
-    /** Размер скользящего окна (1–16 кадров). */
-    public int windowSize = 8;
-
-    /** Интервал ретрансмиссии неподтверждённых кадров, мс. */
-    public int retransmitIntervalMs = 400;
-
     /** Интервал отправки PROBE-запросов, сек. */
     public int probeIntervalSec = 5;
 
