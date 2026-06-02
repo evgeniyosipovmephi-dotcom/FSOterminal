@@ -92,7 +92,13 @@ public class FrameCodec {
      */
     public static final class Decoder {
 
-        private final byte[] buf = new byte[MAX_FRAME * 2]; // двойной запас
+        // Буфер должен вмещать самый большой кусок, который драйвер отдаёт за один
+        // вызов feed() (jSerialComm возвращает содержимое буфера ОС — до нескольких
+        // КБ), плюс недособранный кадр. 490 байт (2 кадра) переполнялись при больших
+        // кусках: feed() затирал старые байты ещё ДО poll(). 8 КБ — с запасом над
+        // буфером ОС, но без избыточного «хвоста» устаревших байт.
+        private static final int BUF_SIZE = 8 * 1024;
+        private final byte[] buf = new byte[BUF_SIZE];
         private int head = 0; // индекс первого занятого байта
         private int tail = 0; // индекс следующей свободной позиции
 
@@ -100,7 +106,7 @@ public class FrameCodec {
         public void feed(byte[] data, int offset, int length) {
             for (int i = offset; i < offset + length; i++) {
                 if (tail - head >= buf.length)
-                    head++; // переполнение — теряем старый байт
+                    head++; // переполнение — теряем старый байт (крайний случай)
                 buf[tail++ % buf.length] = data[i];
             }
         }

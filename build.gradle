@@ -27,10 +27,19 @@ application {
 
 test {
     useJUnitPlatform()
-    // Пробрасываем serial.* и другие -D свойства из Gradle в JVM тестов
+    // Пробрасываем serial.*, bulk.*, window.* свойства из Gradle в JVM тестов
     systemProperties System.properties.subMap(
-        System.properties.keySet().findAll { it.toString().startsWith('serial.') }
+        System.properties.keySet().findAll { key ->
+            ['serial.', 'bulk.', 'window.', 'test.'].any { key.toString().startsWith(it) }
+        }
     )
+    // Показываем stdout/stderr тестов прямо в консоли Gradle
+    testLogging {
+        showStandardStreams = true
+        events 'passed', 'failed', 'skipped'
+    }
+    // UTF-8 для System.out в тестах — иначе кириллица ломается в PowerShell
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
 }
 
 compileJava.options.encoding = 'UTF-8'

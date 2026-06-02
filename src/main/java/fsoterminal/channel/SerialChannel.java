@@ -19,7 +19,8 @@ import java.util.function.Consumer;
 public class SerialChannel {
 
     private SerialPort        port;
-    private Consumer<byte[]>  receiveHandler;
+    // volatile: пишется из UI/тест-потока, читается из потока-слушателя jSerialComm
+    private volatile Consumer<byte[]> receiveHandler;
 
     // -------------------------------------------------------------------------
     // Список портов
