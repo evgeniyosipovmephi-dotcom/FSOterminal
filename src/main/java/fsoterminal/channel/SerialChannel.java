@@ -21,6 +21,8 @@ public class SerialChannel {
     private SerialPort        port;
     // volatile: пишется из UI/тест-потока, читается из потока-слушателя jSerialComm
     private volatile Consumer<byte[]> receiveHandler;
+    // Вызывается при физическом отключении порта (USB выдернут) — мгновенно, без таймаута PROBE
+    private volatile Runnable disconnectHandler;
 
     // -------------------------------------------------------------------------
     // Список портов
@@ -73,13 +75,19 @@ public class SerialChannel {
         port.addDataListener(new SerialPortDataListener() {
             @Override
             public int getListeningEvents() {
-                return SerialPort.LISTENING_EVENT_DATA_RECEIVED;
+                return SerialPort.LISTENING_EVENT_DATA_RECEIVED
+                     | SerialPort.LISTENING_EVENT_PORT_DISCONNECTED;
             }
 
             @Override
             public void serialEvent(SerialPortEvent event) {
+                if ((event.getEventType() & SerialPort.LISTENING_EVENT_PORT_DISCONNECTED) != 0) {
+                    Runnable dh = disconnectHandler;
+                    if (dh != null) dh.run();
+                    return;
+                }
                 byte[] data = event.getReceivedData();
-                if (receiveHandler != null && data.length > 0)
+                if (receiveHandler != null && data != null && data.length > 0)
                     receiveHandler.accept(data);
             }
         });
@@ -125,6 +133,11 @@ public class SerialChannel {
      */
     public void setReceiveHandler(Consumer<byte[]> handler) {
         this.receiveHandler = handler;
+    }
+
+    /** Установить обработчик физического отключения порта (USB выдернут). */
+    public void setDisconnectHandler(Runnable handler) {
+        this.disconnectHandler = handler;
     }
 
     // -------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package fsoterminal.model;
 
 import javafx.beans.property.SimpleDoubleProperty;
+import javafx.beans.property.SimpleObjectProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
@@ -19,6 +20,8 @@ public class ChatItem {
 
     public enum Kind      { TEXT, FILE, IMAGE, VOICE }
     public enum Direction { SENT, RECEIVED, SYSTEM }
+    /** Статус доставки исходящего сообщения/файла. */
+    public enum Status    { PENDING, DELIVERED, FAILED }
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
 
@@ -56,6 +59,15 @@ public class ChatItem {
      */
     private volatile Runnable cancelAction;
 
+    /** Действие повтора отправки (для FAILED). null — повтор недоступен. */
+    private volatile Runnable retryAction;
+
+    /**
+     * Статус доставки. Ненулевой только для исходящих (SENT) сообщений/файлов.
+     * Observable → ChatCell обновляет значок ✓/✗/🕓 реактивно.
+     */
+    private final SimpleObjectProperty<Status> status;
+
     // -------------------------------------------------------------------------
 
     private ChatItem(Kind kind, Direction direction, String text,
@@ -68,6 +80,8 @@ public class ChatItem {
         this.fileSize  = fileSize;
         this.progress  = withProgress ? new SimpleDoubleProperty(0.0) : null;
         this.savedPath = new SimpleStringProperty(null);
+        this.status    = (direction == Direction.SENT)
+            ? new SimpleObjectProperty<>(Status.PENDING) : null;
     }
 
     // --- TEXT ----------------------------------------------------------------
@@ -134,6 +148,14 @@ public class ChatItem {
 
     public void setCancelAction(Runnable r) { cancelAction = r; }
     public Runnable getCancelAction()       { return cancelAction; }
+
+    public void setRetryAction(Runnable r) { retryAction = r; }
+    public Runnable getRetryAction()       { return retryAction; }
+
+    /** Observable-свойство статуса (null для RECEIVED/SYSTEM). */
+    public SimpleObjectProperty<Status> statusProperty() { return status; }
+    public Status getStatusValue() { return status != null ? status.get() : null; }
+    public void   setStatus(Status s) { if (status != null) status.set(s); }
 
     public static boolean isImageName(String name) {
         return hasExtension(name, IMAGE_EXTS);

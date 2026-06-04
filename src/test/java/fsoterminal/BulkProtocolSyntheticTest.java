@@ -115,7 +115,7 @@ class BulkProtocolSyntheticTest {
 
         txA.start();
         txB.start();
-        msgA[0].send(text, err -> fail("Ошибка отправки MSG: " + err));
+        msgA[0].send(text, null, err -> fail("Ошибка отправки MSG: " + err));
 
         assertTrue(done.await(30, TimeUnit.SECONDS), "MSG не доставлен за 30 с");
         txA.stop();

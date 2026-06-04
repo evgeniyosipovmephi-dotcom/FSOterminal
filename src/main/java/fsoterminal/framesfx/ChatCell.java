@@ -12,6 +12,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.Node;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.HBox;
@@ -48,8 +49,10 @@ public class ChatCell extends ListCell<ChatItem> {
     private final Label       lblFileMeta  = new Label();
     private final ImageView   thumbnail    = new ImageView();
 
-    // --- Отмена ---
+    // --- Отмена / статус доставки / повтор ---
     private final Button btnCancel = new Button("✕");
+    private final Label  lblStatus = new Label();      // 🕓 / ✓ / ✗
+    private final Button btnRetry  = new Button("↻");  // повтор для FAILED
 
     // --- Голос ---
     private final HBox   voiceRow     = new HBox(8);
@@ -66,6 +69,8 @@ public class ChatCell extends ListCell<ChatItem> {
     // --- Listener management ---
     private ChatItem               boundItem;
     private ChangeListener<String> pathListener;
+    private ChatItem                            statusItem;
+    private ChangeListener<ChatItem.Status>     statusListener;
 
     // =========================================================================
 
@@ -99,6 +104,13 @@ public class ChatCell extends ListCell<ChatItem> {
         btnCancel.getStyleClass().add("btn-cancel");
         btnCancel.setVisible(false);
         btnCancel.setManaged(false);
+
+        // Статус доставки + повтор
+        lblStatus.setStyle("-fx-font-size: 12px;");
+        show(lblStatus, false);
+        btnRetry.getStyleClass().add("btn-retry");
+        btnRetry.setStyle("-fx-padding: 0 6; -fx-cursor: hand;");
+        show(btnRetry, false);
 
         // Голос
         lblVoiceIcon.setStyle("-fx-font-size: 16px;");
@@ -149,19 +161,14 @@ public class ChatCell extends ListCell<ChatItem> {
     private void buildText(ChatItem item) {
         lblText.setText(item.text);
         lblTime.setText(item.time);
-        if (item.progressProperty() != null) {
-            txtProgress.progressProperty().bind(item.progressProperty());
-            // Visibility через Binding — корректно работает при любом текущем progress
-            txtProgress.visibleProperty().bind(
-                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
-            txtProgress.managedProperty().bind(
-                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
-            bubble.getChildren().addAll(lblText, txtProgress, lblTime);
-        } else {
-            txtProgress.setVisible(false);
-            txtProgress.setManaged(false);
-            bubble.getChildren().addAll(lblText, lblTime);
-        }
+        txtProgress.setVisible(false);
+        txtProgress.setManaged(false);
+        bubble.getChildren().add(lblText);
+        // Для исходящего текста — строка со временем + значок статуса (✓/✗/🕓) и повтор
+        if (item.direction == ChatItem.Direction.SENT)
+            bubble.getChildren().add(buildMetaRow(item, lblTime, false));
+        else
+            bubble.getChildren().add(lblTime);
     }
 
     private void buildFile(ChatItem item) {
@@ -172,7 +179,7 @@ public class ChatCell extends ListCell<ChatItem> {
         thumbnail.setVisible(false);
         thumbnail.setManaged(false);
         bindFileProgressUi(item);
-        HBox metaRow = buildMetaRow(item, lblFileMeta);
+        HBox metaRow = buildMetaRow(item, lblFileMeta, true);
         bubble.getChildren().addAll(lblFileName, fileProgress, metaRow);
     }
 
@@ -229,7 +236,7 @@ public class ChatCell extends ListCell<ChatItem> {
         }
 
         lblVoiceMeta.setText(AudioRecorder.formatDuration(dur) + "  ·  " + item.time);
-        HBox metaRow = buildMetaRow(item, lblVoiceMeta);
+        HBox metaRow = buildMetaRow(item, lblVoiceMeta, true);
         bubble.getChildren().addAll(voiceRow, fileProgress, metaRow);
     }
 
@@ -258,22 +265,59 @@ public class ChatCell extends ListCell<ChatItem> {
         boundItem = item;
     }
 
-    /** Строит строку с мета-данными и кнопкой ✕ (для SENT-кадров в процессе передачи). */
-    private HBox buildMetaRow(ChatItem item, Label metaLabel) {
-        if (item.direction == ChatItem.Direction.SENT && item.progressProperty() != null) {
-            btnCancel.setOnAction(e -> { Runnable ca = item.getCancelAction(); if (ca != null) ca.run(); });
-            btnCancel.visibleProperty().bind(
-                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
-            btnCancel.managedProperty().bind(
-                Bindings.createBooleanBinding(() -> item.getProgress() < 1.0, item.progressProperty()));
-        } else {
-            btnCancel.setVisible(false);
-            btnCancel.setManaged(false);
-        }
-        HBox row = new HBox(6, metaLabel, btnCancel);
+    /**
+     * Строка мета-данных: [метка][✕ отмена][значок статуса][↻ повтор].
+     * Видимость элементов управляется статусом доставки (applyStatus).
+     */
+    private HBox buildMetaRow(ChatItem item, Label metaLabel, boolean withCancel) {
+        HBox row = new HBox(6, metaLabel);
         row.setAlignment(Pos.CENTER_LEFT);
+        if (withCancel) {
+            btnCancel.setOnAction(e -> { Runnable ca = item.getCancelAction(); if (ca != null) ca.run(); });
+            row.getChildren().add(btnCancel);
+        }
+        row.getChildren().addAll(lblStatus, btnRetry);
+        setupStatus(item);
         return row;
     }
+
+    /** Подписывается на статус доставки исходящего и отрисовывает значок ✓/✗/🕓 + повтор. */
+    private void setupStatus(ChatItem item) {
+        if (item.statusProperty() == null) {            // входящее/системное — статуса нет
+            show(lblStatus, false);
+            show(btnRetry, false);
+            return;
+        }
+        btnRetry.setOnAction(e -> { Runnable r = item.getRetryAction(); if (r != null) r.run(); });
+        statusListener = (o, ov, nv) -> applyStatus(item);
+        statusItem = item;
+        item.statusProperty().addListener(statusListener);
+        applyStatus(item);
+    }
+
+    private void applyStatus(ChatItem item) {
+        ChatItem.Status s = item.getStatusValue();
+        boolean cancellable = item.kind == ChatItem.Kind.FILE
+                           || item.kind == ChatItem.Kind.IMAGE
+                           || item.kind == ChatItem.Kind.VOICE;
+        if (s == null) { show(lblStatus, false); show(btnRetry, false); show(btnCancel, false); return; }
+        switch (s) {
+            case PENDING -> {
+                lblStatus.setText("🕓"); lblStatus.setStyle("-fx-text-fill:#888; -fx-font-size:12px;");
+                show(lblStatus, true); show(btnRetry, false); show(btnCancel, cancellable);
+            }
+            case DELIVERED -> {
+                lblStatus.setText("✓"); lblStatus.setStyle("-fx-text-fill:#2e9e2e; -fx-font-size:12px; -fx-font-weight:bold;");
+                show(lblStatus, true); show(btnRetry, false); show(btnCancel, false);
+            }
+            case FAILED -> {
+                lblStatus.setText("✗"); lblStatus.setStyle("-fx-text-fill:#d33; -fx-font-size:12px; -fx-font-weight:bold;");
+                show(lblStatus, true); show(btnRetry, true); show(btnCancel, false);
+            }
+        }
+    }
+
+    private static void show(Node n, boolean v) { n.setVisible(v); n.setManaged(v); }
 
     // =========================================================================
     // Воспроизведение
@@ -387,8 +431,14 @@ public class ChatCell extends ListCell<ChatItem> {
         fileProgress.managedProperty().unbind();
         btnCancel.visibleProperty().unbind();
         btnCancel.managedProperty().unbind();
-        btnCancel.setVisible(false);
-        btnCancel.setManaged(false);
+        show(btnCancel, false);
+        show(lblStatus, false);
+        show(btnRetry, false);
+
+        // Снять слушатель статуса
+        if (statusItem != null && statusListener != null)
+            statusItem.statusProperty().removeListener(statusListener);
+        statusItem = null; statusListener = null;
 
         // Снять слушателей savedPath
         if (boundItem != null && pathListener != null)

@@ -140,7 +140,7 @@ class SerialLoopbackTest {
     private void transferMsg(Peer from, Peer to, String text) throws Exception {
         to.textLatch = new CountDownLatch(1);
         AtomicReference<String> err = new AtomicReference<>();
-        from.msgChannel.send(text, e -> { err.set(e); to.textLatch.countDown(); });
+        from.msgChannel.send(text, null, e -> { err.set(e); to.textLatch.countDown(); });
 
         boolean ok = to.textLatch.await(30, TimeUnit.SECONDS);
         assertNull(err.get(), "MSG завершился ошибкой: " + err.get());

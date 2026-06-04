@@ -62,6 +62,9 @@ public class MainWindowSC implements Initializable {
     /** ChatItem входящего файла/изображения/голоса (для обновления прогресса). */
     private ChatItem incomingFileItem;
 
+    /** ChatItem исходящего файла в процессе передачи (чтобы пометить ✗ при обрыве). */
+    private ChatItem outgoingFileItem;
+
     /** Одна исходящая bulk-передача за раз. */
     private final AtomicBoolean sendingFile = new AtomicBoolean(false);
 
@@ -186,6 +189,9 @@ public class MainWindowSC implements Initializable {
         }));
 
         channel.setReceiveHandler(this::onBytes);
+        channel.setDisconnectHandler(() -> Platform.runLater(() -> {
+            if (channel != null) { addSystem("COM-порт отключён"); disconnect(); }
+        }));
 
         if (channel.open(portItem, 115200)) {
             tx.start();
@@ -247,10 +253,20 @@ public class MainWindowSC implements Initializable {
         msgChannel = null; rxDecoder = null;
         sendingFile.set(false);
 
+        // Исходящий файл в процессе → пометить ✗ (повтор уже доступен), а не висеть на 🕓
+        if (outgoingFileItem != null) {
+            ChatItem out = outgoingFileItem;
+            outgoingFileItem = null;
+            if (out.getStatusValue() == ChatItem.Status.PENDING) {
+                out.setStatus(ChatItem.Status.FAILED);
+                addSystem("Отправка файла прервана (разрыв соединения)");
+            }
+        }
+        // Недопринятый входящий файл → убрать пузырь
         if (incomingFileItem != null) {
             chatItems.remove(incomingFileItem);
             incomingFileItem = null;
-            addSystem("Передача файла прервана (разрыв соединения)");
+            addSystem("Приём файла прерван (разрыв соединения)");
         }
         updateUiState(false);
     }
@@ -265,10 +281,23 @@ public class MainWindowSC implements Initializable {
         if (text.isEmpty()) return;
         txtMessage.clear();
 
-        chatItems.add(ChatItem.sent(text));
+        ChatItem item = ChatItem.sent(text);
+        chatItems.add(item);
         scrollToBottom();
+        sendTextFor(item, text);
+    }
 
-        msgChannel.send(text, err -> addSystem("Сообщение не доставлено: " + err));
+    /** Отправляет текст для существующего пузыря и проставляет статус доставки. */
+    private void sendTextFor(ChatItem item, String text) {
+        if (msgChannel == null) return;
+        item.setStatus(ChatItem.Status.PENDING);
+        item.setRetryAction(null);
+        msgChannel.send(text,
+            ()  -> Platform.runLater(() -> item.setStatus(ChatItem.Status.DELIVERED)),
+            err -> Platform.runLater(() -> {
+                item.setStatus(ChatItem.Status.FAILED);
+                item.setRetryAction(() -> sendTextFor(item, text));
+            }));
     }
 
     // =========================================================================
@@ -286,14 +315,10 @@ public class MainWindowSC implements Initializable {
 
     private void sendFile(File file) {
         if (bulkSender == null || channel == null || !channel.isOpen()) return;
-        if (!sendingFile.compareAndSet(false, true)) {
-            addSystem("Дождитесь завершения текущей передачи файла");
-            return;
-        }
 
         byte[] data;
         try { data = Files.readAllBytes(file.toPath()); }
-        catch (Exception e) { addSystem("Ошибка чтения: " + e.getMessage()); sendingFile.set(false); return; }
+        catch (Exception e) { addSystem("Ошибка чтения: " + e.getMessage()); return; }
 
         String name = file.getName();
         int    kind;
@@ -309,9 +334,31 @@ public class MainWindowSC implements Initializable {
         chatItems.add(item);
         scrollToBottom();
 
+        if (!startBulkSend(item, kind, name, data)) {   // канал занят другой передачей
+            item.setStatus(ChatItem.Status.FAILED);
+            item.setRetryAction(() -> startBulkSend(item, kind, name, data));
+        }
+    }
+
+    /**
+     * Запускает (или повторяет) bulk-передачу для существующего пузыря, проставляя статус.
+     * @return false, если канал занят другой передачей (повтор остаётся доступен).
+     */
+    private boolean startBulkSend(ChatItem item, int kind, String name, byte[] data) {
+        if (bulkSender == null || channel == null || !channel.isOpen()) return false;
+        if (!sendingFile.compareAndSet(false, true)) {
+            addSystem("Дождитесь завершения текущей передачи файла");
+            return false;
+        }
+        outgoingFileItem = item;
+        item.setStatus(ChatItem.Status.PENDING);
+        item.setProgress(0);
+        // Повтор доступен сразу (на случай обрыва канала, когда onError не вызывается)
+        item.setRetryAction(() -> startBulkSend(item, kind, name, data));
         item.setCancelAction(() -> {
             bulkSender.cancel();
             tx.clearPaced();
+            outgoingFileItem = null;
             sendingFile.set(false);
             Platform.runLater(() -> { chatItems.remove(item); addSystem("Отправка отменена: " + name); });
         });
@@ -321,14 +368,19 @@ public class MainWindowSC implements Initializable {
             ()  -> Platform.runLater(() -> {
                 item.setProgress(1.0);
                 item.setCancelAction(null);
+                item.setRetryAction(null);
+                item.setStatus(ChatItem.Status.DELIVERED);
+                outgoingFileItem = null;
                 sendingFile.set(false);
-                addSystem("Файл отправлен: " + name + " (" + ChatItem.formatSize(data.length) + ")");
             }),
             err -> Platform.runLater(() -> {
                 item.setCancelAction(null);
+                item.setStatus(ChatItem.Status.FAILED);   // retryAction уже установлен
+                outgoingFileItem = null;
                 sendingFile.set(false);
                 addSystem("Передача прервана: " + name + " — " + err);
             }));
+        return true;
     }
 
     /** Сохраняет принятый файл в папку загрузок, обновляет ChatItem. */
@@ -530,7 +582,7 @@ public class MainWindowSC implements Initializable {
     private void onHelp() {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle("О программе FSO Terminal");
-        alert.setHeaderText("FSO Terminal 2.0.1  —  оптический терминал связи");
+        alert.setHeaderText("FSO Terminal 2.0.2  —  оптический терминал связи");
         alert.initOwner(chatList.getScene().getWindow());
 
         String savePath = getDownloadPath().toAbsolutePath().toString();

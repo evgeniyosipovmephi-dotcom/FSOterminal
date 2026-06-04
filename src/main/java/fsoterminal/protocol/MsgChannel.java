@@ -48,9 +48,12 @@ public class MsgChannel {
     }
 
     /** Отправить текст в фоне (stop-and-wait по фрагментам). */
-    public void send(String text, Consumer<String> onError) {
+    public void send(String text, Runnable onDelivered, Consumer<String> onError) {
         Thread t = new Thread(() -> {
-            try { sendBlocking(text); }
+            try {
+                sendBlocking(text);
+                if (onDelivered != null) onDelivered.run();
+            }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             catch (TimeoutException te)    { if (onError != null) onError.accept(te.getMessage()); }
         }, "msg-send");
